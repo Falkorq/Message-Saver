@@ -2,6 +2,8 @@ import json
 import logging
 import re
 import time
+from .analytics import AnalyticsRepository
+from .backup import backup_database
 from datetime import datetime, timedelta, timezone
 
 
@@ -16,12 +18,15 @@ MOSCOW = timezone(timedelta(hours=3))
 log = logging.getLogger(__name__)
 
 
-class BusinessToolsRepository:
+class BusinessToolsRepository(AnalyticsRepository):
     def __init__(self, db, routes):
         self.db = db
         self.routes = routes
 
     def migrate(self):
+        exists = self.db.execute("SELECT 1 FROM sqlite_master WHERE name='business_stats_progress'").fetchone()
+        if not exists:
+            backup_database(self.db)
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS business_mutes (
             owner_id INTEGER NOT NULL,
@@ -82,15 +87,43 @@ class BusinessToolsRepository:
         );
         """)
         self.db.commit()
+        self.migrate_analytics()
 
     def record_message(self, connection_id, account_id, owner_id, message_id, record, commit=True):
-        now = int(time.time())
+        self.db.execute('SAVEPOINT business_live_stats')
+        try:
+            result = self._record_message(connection_id,account_id,owner_id,message_id,record)
+        except Exception:
+            self.db.execute('ROLLBACK TO SAVEPOINT business_live_stats')
+            self.db.execute('RELEASE SAVEPOINT business_live_stats')
+            raise
+        self.db.execute('RELEASE SAVEPOINT business_live_stats')
+        if commit: self.db.commit()
+        return result
+
+    def _record_message(self, connection_id, account_id, owner_id, message_id, record):
+        self.check_account(owner_id, account_id)
+        self.check_chat_owner(owner_id,account_id,record['chat_id'])
+        text = record.get("text") or record.get("caption") or ""
+        if not isinstance(text, str):
+            raise ValueError("Invalid message text type")
+        now = int(record.get('_observed_at') or time.time())
         inserted = self.db.execute(
-            "INSERT OR IGNORE INTO business_stats_seen VALUES(?,?,?,?)",
-            (connection_id, record["chat_id"], message_id, now),
+            "INSERT OR IGNORE INTO business_stats_seen(connection_id,chat_id,message_id,observed_at,account_id) VALUES(?,?,?,?,?)",
+            (connection_id, record["chat_id"], message_id, now, account_id),
         ).rowcount
         if not inserted:
-            return False
+            seen = self.db.execute("SELECT counted,observed_at FROM business_stats_seen WHERE connection_id=? AND chat_id=? AND message_id=?",
+                                   (connection_id,record['chat_id'],message_id)).fetchone()
+            if seen['counted']:
+                self.update_first_observed(account_id,record['chat_id'],seen['observed_at'])
+                self.db.execute('UPDATE business_stats_seen SET account_id=COALESCE(account_id,?) '
+                                'WHERE connection_id=? AND chat_id=? AND message_id=?',
+                                (account_id,connection_id,record['chat_id'],message_id))
+                self.record_details(connection_id, account_id, message_id, record)
+                return False
+            self.db.execute("UPDATE business_stats_seen SET counted=1 WHERE connection_id=? AND chat_id=? AND message_id=?",
+                            (connection_id,record['chat_id'],message_id))
         chat_id = record["chat_id"]
         own = record.get("sender_id") == account_id
         display_name = record.get("chat_name") or record.get("name") or str(chat_id)
@@ -135,20 +168,46 @@ class BusinessToolsRepository:
                     "ON CONFLICT(account_id,chat_id,word) DO UPDATE SET count=count+1",
                     (account_id, chat_id, word),
                 )
+            self.record_details(connection_id, account_id, message_id, record)
+            self.update_first_observed(account_id,chat_id,now)
         except Exception:
             # Без rollback строка seen осталась бы в транзакции и сохранилась бы позже
             # без статистики — сообщение считалось бы обработанным, но не посчитанным.
-            self.db.rollback()
             raise
-        if commit:
-            self.db.commit()
         return True
 
-    def backfill(self):
-        rows = self.db.execute(
-            "SELECT m.connection_id,m.chat_id,m.message_id,m.data,c.account_id FROM messages m "
-            "JOIN connections c ON c.connection_id=m.connection_id"
-        ).fetchall()
+    def backfill(self, batch_size=250, max_batches=None):
+        """Checkpoint each bounded batch; a restart continues after the last committed rowid.
+
+        Inserts arriving during recovery are already counted by the live handler. The
+        seen key makes both paths idempotent. No source rows are removed by recovery.
+        """
+        if not self.db.execute("SELECT 1 FROM sqlite_master WHERE name='messages'").fetchone():
+            return 0
+        added = 0
+        batches = 0
+        while max_batches is None or batches < max_batches:
+            progress = self.db.execute("SELECT value FROM business_stats_progress WHERE name='backfill_rowid'").fetchone()
+            cursor = progress[0] if progress else 0
+            has_created = 'created_at' in {r[1] for r in self.db.execute('PRAGMA table_info(messages)')}
+            rows = self.db.execute(
+                "SELECT m.rowid AS cursor,m.connection_id,m.chat_id,m.message_id,m.data,c.account_id," +
+                ("m.created_at" if has_created else "NULL") + " AS observed_at FROM messages m "
+                "LEFT JOIN connections c ON c.connection_id=m.connection_id WHERE m.rowid>? ORDER BY m.rowid LIMIT ?",
+                (cursor, batch_size),
+            ).fetchall()
+            if not rows:
+                self.db.execute("INSERT OR REPLACE INTO business_stats_progress VALUES('backfill_complete',1)")
+                self.db.commit()
+                break
+            self.db.execute("INSERT OR REPLACE INTO business_stats_progress VALUES('backfill_complete',0)")
+            added += self._backfill_batch(rows)
+            self.db.execute("INSERT OR REPLACE INTO business_stats_progress VALUES('backfill_rowid',?)", (rows[-1]['cursor'],))
+            self.db.commit()
+            batches += 1
+        return added
+
+    def _backfill_batch(self, rows):
         added = 0
         skipped = 0
         for row in rows:
@@ -161,6 +220,8 @@ class BusinessToolsRepository:
                     raise ValueError("record is not an object")
                 # Older bot versions stored the chat ID only in messages.chat_id.
                 record["chat_id"] = row["chat_id"]
+                if row['observed_at']:
+                    record['_observed_at'] = row['observed_at']
                 self.db.execute("SAVEPOINT business_stats_backfill")
                 try:
                     added += int(self.record_message(
@@ -175,7 +236,6 @@ class BusinessToolsRepository:
             except Exception:
                 skipped += 1
                 continue
-        self.db.commit()
         if skipped:
             log.warning("Статистика: пропущено %s повреждённых старых записей", skipped)
         return added
@@ -203,6 +263,7 @@ class BusinessToolsRepository:
         ).fetchall()
 
     def matching_chats(self, owner_id, target, account_id=None):
+        self.check_account(owner_id,account_id)
         text = str(target).strip().lstrip("@").lower()
         if text.lstrip("-").isdigit():
             match = "chat_id=?"
@@ -237,6 +298,7 @@ class BusinessToolsRepository:
         return next((row for row in rows if (row["username"] or "").lower() == text), None)
 
     def stat(self, owner_id, account_id, chat_id):
+        self.check_account(owner_id, account_id)
         row = self.db.execute(
             "SELECT * FROM business_chat_stats WHERE owner_id=? AND account_id=? AND chat_id=?",
             (owner_id, account_id, chat_id),
@@ -254,6 +316,7 @@ class BusinessToolsRepository:
         return row, days, words
 
     def mute(self, owner_id, row, until_at):
+        self.check_account(owner_id,row['account_id'])
         self.db.execute(
             "INSERT INTO business_mutes(owner_id,account_id,chat_id,display_name,username,until_at,added_at,last_error) "
             "VALUES(?,?,?,?,?,?,?,NULL) ON CONFLICT(account_id,chat_id) DO UPDATE SET owner_id=excluded.owner_id,"
@@ -265,6 +328,7 @@ class BusinessToolsRepository:
         self.db.commit()
 
     def unmute(self, owner_id, account_id, chat_id):
+        self.check_account(owner_id,account_id)
         result = self.db.execute(
             "DELETE FROM business_mutes WHERE owner_id=? AND account_id=? AND chat_id=?",
             (owner_id, account_id, chat_id),

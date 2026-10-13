@@ -64,7 +64,8 @@ class CommandUITests(unittest.IsolatedAsyncioTestCase):
         db.row_factory = sqlite3.Row
         repo = BusinessToolsRepository(db, {100: 1})
         repo.migrate()
-        ui = BusinessToolsUI(reply_bot, SimpleNamespace(account_labels={100: "Account 1"}), repo, {100: 1}, "unused.png")
+        service = BusinessToolsService(reply_bot,repo,lambda *args:None,{100:'Account 1'})
+        ui = BusinessToolsUI(reply_bot, service, repo, {100: 1}, "unused.png")
         await ui.handle_command(SimpleNamespace(
             from_user=SimpleNamespace(id=100), chat=SimpleNamespace(id=100), text="/chatstats"
         ))
@@ -92,6 +93,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertTrue(any(item["word"] == "привет" for item in words))
 
     def test_summary_sorting_and_same_chat_on_multiple_accounts(self):
+        self.repo.routes[101] = 1
         first = record(message_id=1)
         second = record(message_id=2)
         second["chat_id"] = 300

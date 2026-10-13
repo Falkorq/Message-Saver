@@ -96,6 +96,9 @@ db_path = Path(os.getenv("DB_PATH", "messages.sqlite3"))
 db_path.parent.mkdir(parents=True, exist_ok=True)
 db = sqlite3.connect(db_path)
 db.row_factory = sqlite3.Row
+from business_tools.backup import backup_database
+if not db.execute("SELECT 1 FROM sqlite_master WHERE name='business_stats_progress'").fetchone():
+    backup_database(db, "before-update")
 db.execute("PRAGMA journal_mode=WAL")
 db.executescript("""
 CREATE TABLE IF NOT EXISTS connections (
@@ -217,6 +220,8 @@ def record_from_message(msg):
         "chat_name": chat_name,
         "chat_username": getattr(chat, "username", None),
         "sent_at": getattr(msg, "date", None),
+        "edit_at": getattr(msg, "edit_date", None),
+        "metadata": {"duration": getattr(media, "duration", None)},
     }
 
 
@@ -329,7 +334,7 @@ async def recipient_for(connection_id):
 async def store_connection(connection):
     account_id = connection.user.id
     recipient_id = routes.get(account_id)
-    known = db.execute("SELECT 1 FROM connections WHERE connection_id=?", (connection.id,)).fetchone()
+    known = db.execute("SELECT enabled FROM connections WHERE connection_id=?", (connection.id,)).fetchone()
     if recipient_id is None and not known:
         log.warning("Игнорирую неизвестный аккаунт %s; выдайте доступ через /grant %s", account_id, account_id)
     db.execute(
@@ -340,6 +345,8 @@ async def store_connection(connection):
     )
     db.commit()
     if recipient_id is not None:
+        if not known or known['enabled'] != int(connection.is_enabled):
+            business_tools.repo.reset_continuity(account_id)
         log.info("Подключение %s: аккаунт %s, активно=%s", connection.id, account_id, connection.is_enabled)
 
 
@@ -542,6 +549,7 @@ async def on_edit(msg):
     key = message_key(msg)
     old = load_message(key)
     new = record_from_message(msg)
+    business_tools.service.record_edit(recipient_id,account_for(msg.business_connection_id),key,old,new)
     if old and not old.get("sent_at") and new.get("sent_at"):
         old["sent_at"] = new["sent_at"]
     if old and not old.get("username") and new.get("username"):
@@ -568,13 +576,15 @@ async def on_delete(event):
         return
     for message_id in event.message_ids:
         key = (event.business_connection_id, event.chat.id, message_id)
-        if business_tools.consume_self_deleted(*key):
+        record = load_message(key)
+        self_deleted = business_tools.consume_self_deleted(*key)
+        business_tools.service.record_deletion(recipient_id,account_for(event.business_connection_id),key,record,self_deleted)
+        if self_deleted:
             db.execute(
                 "DELETE FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?", key
             )
             db.commit()
             continue
-        record = load_message(key)
         if record is None:
             continue
         record.setdefault("chat_id", event.chat.id)
@@ -793,7 +803,9 @@ async def outbox_worker():
     while True:
         if time.time() - last_cleanup > 3600:
             cutoff = int(time.time()) - retention_days * 86400
-            db.execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
+            recovered = db.execute("SELECT value FROM business_stats_progress WHERE name='backfill_complete'").fetchone()
+            if recovered and recovered[0]:
+                db.execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
             db.commit()
             last_cleanup = time.time()
         row = db.execute(
@@ -863,6 +875,7 @@ async def supervise_outbox():
 
 async def main():
     worker = asyncio.create_task(supervise_outbox())
+    recovery = asyncio.create_task(business_tools.recover_history())
     try:
         await profile_monitor.start()
         await bot.set_my_commands([
@@ -883,7 +896,8 @@ async def main():
     finally:
         await profile_monitor.close()
         worker.cancel()
-        await asyncio.gather(worker, return_exceptions=True)
+        recovery.cancel()
+        await asyncio.gather(worker, recovery, return_exceptions=True)
         db.close()
 
 

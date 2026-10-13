@@ -123,6 +123,50 @@ BUTTON_ICON_IDS = {
 }
 
 
+# Statistics tabs reuse the established premium emoji palette.
+BUTTON_ICON_IDS.update({
+    'Аккаунт': TEXT_EMOJI_IDS['account'][0],
+    'Все свои аккаунты': TEXT_EMOJI_IDS['account'][0],
+    'Сегодня': TEXT_EMOJI_IDS['date'][0],
+    '7 дней': TEXT_EMOJI_IDS['date'][0],
+    '30 дней': TEXT_EMOJI_IDS['date'][0],
+    'Всё время': TEXT_EMOJI_IDS['time'][0],
+    'Сводка': TEXT_EMOJI_IDS['chat_stats'][0],
+    'Чаты': TEXT_EMOJI_IDS['list'][0],
+    'Моя статистика': TEXT_EMOJI_IDS['owner_messages'][0],
+    'Рейтинги': TEXT_EMOJI_IDS['chat_list_stats'][0],
+    'Ответы': TEXT_EMOJI_IDS['messages'][0],
+    'Обзор': TEXT_EMOJI_IDS['chat_stats'][0],
+    'Медиа': TEXT_EMOJI_IDS['media'][0],
+    'Слова': TEXT_EMOJI_IDS['top_words'][0],
+    'Об учёте': TEXT_EMOJI_IDS['stat_info'][0],
+    'Кратко': TEXT_EMOJI_IDS['compact'][0],
+    'Подробнее': TEXT_EMOJI_IDS['detailed'][0],
+    'Паузы >4 ч': TEXT_EMOJI_IDS['time'][0],
+    'Инициатива': TEXT_EMOJI_IDS['owner_messages'][0],
+    'Удаления': TEXT_EMOJI_IDS['disabled'][0],
+    'Правки': TEXT_EMOJI_IDS['history'][0],
+    'Дни': TEXT_EMOJI_IDS['date'][0],
+    'Неделя': TEXT_EMOJI_IDS['date'][0],
+    'Часы': TEXT_EMOJI_IDS['time'][0],
+    'Сравнение': TEXT_EMOJI_IDS['chat_list_stats'][0],
+    'Количество': TEXT_EMOJI_IDS['media'][0],
+    'Активность': TEXT_EMOJI_IDS['date'][0],
+    'Удаления и правки': TEXT_EMOJI_IDS['history'][0],
+    '💳 Слова': TEXT_EMOJI_IDS['top_words'][0],
+    'Рекорды': TEXT_EMOJI_IDS['chat_stats'][0],
+    'Вы': TEXT_EMOJI_IDS['owner_messages'][0],
+    'Собеседник': TEXT_EMOJI_IDS['peer_messages'][0],
+    'Оба': TEXT_EMOJI_IDS['list'][0],
+    'Голосовые': TEXT_EMOJI_IDS['voice'][0],
+    'Длительность': TEXT_EMOJI_IDS['duration'][0],
+    'Удалено: собеседник': TEXT_EMOJI_IDS['disabled'][0],
+    'Удалено: вы': TEXT_EMOJI_IDS['disabled'][0],
+    '◀ Текст': TEXT_EMOJI_IDS['back'][0],
+    'Текст ▶': BUTTON_ICON_IDS['▶'],
+})
+
+
 UNICODE_PREFIXES = (
     "👤", "📡", "🗃", "🔧", "⚙️", "⚙", "➕", "👥", "🕘", "🖼",
     "🔄", "🔕", "🔔", "⏱", "📝", "📊", "📎", "💳", "◀️", "◀", "▶️", "▶",
