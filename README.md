@@ -1,4 +1,4 @@
-![Messege-Saver — Personal Bot для Telegram](docs/cover.svg)
+![Message-Saver — Personal Bot для Telegram](docs/cover.svg)
 
 <p align="center">
   <a href="#быстрый-запуск"><strong>Быстрый запуск</strong></a> ·
@@ -6,7 +6,7 @@
   <a href="USER_GUIDE.md">Как пользоваться</a>
 </p>
 
-# Messege-Saver
+# Message-Saver
 
 **Personal Bot для Telegram Business:** сохраняет сообщения, показывает историю правок и уведомляет об удалениях. Дополнительно следит за изменениями профилей, собирает статистику чатов и позволяет управлять всем через личный чат с ботом.
 
@@ -28,8 +28,8 @@
 Нужны **Python 3.10+**, токен бота и аккаунт с возможностью подключения Telegram Business / Chat Automation.
 
 ```sh
-git clone https://github.com/Falkorq/Messege-Saver.git
-cd Messege-Saver
+git clone https://github.com/Falkorq/Message-Saver.git
+cd Message-Saver
 python -m venv .venv
 ```
 
