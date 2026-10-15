@@ -441,10 +441,10 @@ class ProfileUI:
         interval = f'{mins} мин' if mins < 60 else '1 час'
         format_name = 'кратко' if row['notification_format']=='compact' else 'подробно'
         text = (f"{icon('settings')} <b>Настройки наблюдения</b>\n\n"
-                f"Уведомления о профилях: {'включены' if row['notifications'] else 'выключены'}\n"
-                f"Проверка: каждые {interval}\n"
-                f"Новые фото: {'сохраняются' if row['keep_photos'] else 'не сохраняются'}\n"
-                f"Текст уведомлений: {format_name}\n\n"
+                f"<b>Уведомления о профилях:</b> {'включены' if row['notifications'] else 'выключены'}\n"
+                f"<b>Проверка:</b> каждые {interval}\n"
+                f"<b>Новые фото:</b> {'сохраняются' if row['keep_photos'] else 'не сохраняются'}\n"
+                f"<b>Текст уведомлений:</b> {format_name}\n\n"
                 'Эти настройки относятся к профилям. Уведомления о сообщениях настраиваются в главном меню бота.')
         await self.edit_text(chat_id, message_id, text, keyboard(
             [button('Уведомления о профилях', 'pm:settings:notify')],
@@ -454,6 +454,7 @@ class ProfileUI:
             [button('К разделу профилей', 'pm:nav:home')]), banner='settings')
 
     async def render_setting(self, chat_id, message_id, field):
+        from ui_text import menu_html
         row = self.repo.settings(self.owner(chat_id))
         if field == 'notify':
             text = ('Уведомления о профилях\n\n'
@@ -475,7 +476,7 @@ class ProfileUI:
         else:
             return await self.render_settings(chat_id, message_id)
         rows.append([button('К настройкам наблюдения', 'pm:nav:settings')])
-        await self.edit_text(chat_id, message_id, text, keyboard(*rows), banner='notifications' if field=='notify' else 'settings')
+        await self.edit_text(chat_id, message_id, menu_html(text), keyboard(*rows), banner='notifications' if field=='notify' else 'settings')
 
     async def render_tools(self, chat_id, message_id):
         text = f"{icon('tools')} <b>Инструменты</b>"

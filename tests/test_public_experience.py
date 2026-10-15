@@ -10,6 +10,7 @@ from business_tools.webapp import create_app
 from profile_monitor.access import MTProtoAccess
 from public_pages import public_url, render_public_page
 from public_ui import PublicUI
+from ui_text import telegram_length
 from release_support import Harness
 
 
@@ -31,7 +32,8 @@ class PublicExperienceTests(unittest.IsolatedAsyncioTestCase):
         for page in ('connect','status','notifications','data','help','privacy','stats','rules'):
             await self.ui.page(100,page)
             text, rows = self.last_page()
-            self.assertLessEqual(len(text),900,(page,len(text)))
+            self.assertLessEqual(telegram_length(text, 'HTML'),900,(page,telegram_length(text, 'HTML')))
+            self.assertIn('<tg-emoji emoji-id="',text)
             callbacks = [b['callback_data'] for row in rows for b in row if 'callback_data' in b]
             self.assertEqual(callbacks[-1],'ny:menu')
             self.assertNotIn('can_read_messages',text)
@@ -53,7 +55,8 @@ class PublicExperienceTests(unittest.IsolatedAsyncioTestCase):
         self.ui.labels[100] = '<b>Untrusted account</b>'
         await self.ui.page(100,'status')
         text,_ = self.last_page()
-        self.assertTrue(text.startswith('<b>Состояние бота</b>'))
+        self.assertIn('<b>Состояние бота</b>\n',text)
+        self.assertTrue(text.startswith('<tg-emoji '))
         self.assertIn('&lt;b&gt;Untrusted account&lt;/b&gt;',text)
         self.assertEqual(self.h.bot.send_photo.await_args.kwargs['parse_mode'],'HTML')
 

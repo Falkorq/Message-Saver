@@ -4,14 +4,15 @@ import os
 import secrets
 import time
 from datetime import datetime, timezone, timedelta
-from html import escape
 from contextvars import ContextVar
 from functools import wraps
+from copy import copy
 from telebot import types
 from telebot.asyncio_helper import ApiTelegramException
 from profile_monitor.style import TEXT_EMOJI_IDS
 from ui_banners import banner_for, banner_cache
 from public_pages import public_url
+from ui_text import menu_html, telegram_length, without_custom_emoji
 
 
 class PublicUI:
@@ -20,6 +21,7 @@ class PublicUI:
         self.product, self.inbox, self.tools, self.profile = product, inbox, tools, profile
         self.mt_access = mt_access
         self.button_icons_enabled = True
+        self.text_icons_enabled = True
         self.banners = banner_cache(bot)
         self.current_message = ContextVar('nyan_public_message', default=None)
 
@@ -76,9 +78,9 @@ class PublicUI:
 
     async def send(self, actor, text, banner=None, **kwargs):
         if banner and '\n' in text and 'parse_mode' not in kwargs:
-            title, body = text.split('\n', 1)
-            text = '<b>' + escape(title) + '</b>\n' + escape(body)
+            text = menu_html(text)
             kwargs['parse_mode'] = 'HTML'
+        caption_fits = telegram_length(text, kwargs.get('parse_mode')) <= 900
         image_path = banner_for(banner)
         current = self.current_message.get()
         editable = current is not None and getattr(current, 'message_id', None) is not None
@@ -100,7 +102,7 @@ class PublicUI:
                 raise
         if image_path:
             async def render(image):
-                if len(text) <= 900:
+                if caption_fits:
                     if editable and getattr(current, 'photo', None):
                         photos = current.photo
                         if isinstance(image, str) and image == photos[-1].file_id:
@@ -118,9 +120,9 @@ class PublicUI:
                 # Keep the complete privacy/help text; photo captions have a smaller limit.
                 return await self.bot.send_photo(actor, image)
             result = await self.banners.use(image_path, render)
-            if len(text) <= 900:
+            if caption_fits:
                 return result
-        elif editable and len(text) <= 900:
+        elif editable and caption_fits:
             method = self.bot.edit_message_caption if getattr(current, 'photo', None) else self.bot.edit_message_text
             done, result = await edit(method, text, **kwargs)
             if done:
@@ -128,6 +130,23 @@ class PublicUI:
         return await self._send_with_icons(self.bot.send_message, actor, text, **kwargs)
 
     async def _send_with_icons(self, method, *args, **kwargs):
+        has_text_icons = any(isinstance(value, str) and '<tg-emoji ' in value
+                             for value in (*args, kwargs.get('caption', ''), kwargs.get('text', '')))
+        has_text_icons = has_text_icons or any(isinstance(value, types.InputMediaPhoto)
+            and '<tg-emoji ' in (value.caption or '') for value in args)
+        def plain_text():
+            def clean(value):
+                if isinstance(value, str):
+                    return without_custom_emoji(value)
+                if isinstance(value, types.InputMediaPhoto):
+                    value = copy(value)
+                    value.caption = without_custom_emoji(value.caption or '')
+                return value
+            options = dict(kwargs)
+            for key in ('caption', 'text'):
+                if key in options:
+                    options[key] = clean(options[key])
+            return tuple(clean(value) for value in args), options
         markup = kwargs.get('reply_markup')
         has_icons = markup is not None and any(getattr(b, 'icon_custom_emoji_id', None) for row in markup.keyboard for b in row)
         def plain_markup():
@@ -140,14 +159,20 @@ class PublicUI:
         if has_icons and not self.button_icons_enabled:
             kwargs['reply_markup'] = plain_markup()
             has_icons = False
+        if has_text_icons and not self.text_icons_enabled:
+            args, kwargs = plain_text()
+            has_text_icons = False
         try:
             return await method(*args, **kwargs)
         except ApiTelegramException as exc:
             description = str(exc.description).lower()
-            if not (has_icons and exc.error_code == 400 and any(term in description for term in ('custom_emoji', 'custom emoji', 'premium', 'button_icon', 'icon_custom'))):
+            if not ((has_icons or has_text_icons) and exc.error_code == 400 and any(term in description for term in ('custom_emoji', 'custom emoji', 'premium', 'button_icon', 'icon_custom'))):
                 raise
             self.button_icons_enabled = False
-            kwargs['reply_markup'] = plain_markup()
+            self.text_icons_enabled = False
+            if has_icons:
+                kwargs['reply_markup'] = plain_markup()
+            args, kwargs = plain_text()
             for value in args:
                 if hasattr(value, 'seek'):
                     value.seek(0)
@@ -389,7 +414,7 @@ class PublicUI:
             if action == 'start' and len(tail)>1 and tail[1] in ('connect','status','notifications','data','help','privacy'):
                 return await self.page(msg.from_user.id, tail[1])
             if action == 'id':
-                return await self.send(msg.chat.id, f'Ваш Telegram ID: {msg.from_user.id}', reply_markup=self.keyboard(msg.from_user.id in self.routes))
+                return await self.send(msg.chat.id, f'<b>Ваш Telegram ID:</b> <code>{int(msg.from_user.id)}</code>', parse_mode='HTML', reply_markup=self.keyboard(msg.from_user.id in self.routes))
             if action in ('start','menu'):
                 return await self.welcome(msg.from_user.id)
             return await self.page(msg.from_user.id, {'chatstats':'stats','mutelist':'rules'}.get(action,action))
@@ -441,8 +466,8 @@ class PublicUI:
             if action in ('stop','resume'):
                 self.product.collection(owner, action == 'resume')
                 kb = self.back(types.InlineKeyboardMarkup(), 'data', 'Вернуться к моим данным')
-                text = ('Сохранение приостановлено. История осталась на месте. Новые сообщения не будут сохраняться, пока вы не возобновите работу.'
-                        if action=='stop' else 'Сохранение возобновлено для новых сообщений. История за время паузы не загружается. Проверьте, что Nyan подключён к нужным чатам.')
+                text = ('Сохранение приостановлено.\n\nИстория осталась на месте. Новые сообщения не будут сохраняться, пока вы не возобновите работу.'
+                        if action=='stop' else 'Сохранение возобновлено.\n\nСохраняются новые сообщения. История за время паузы не загружается. Проверьте, что Nyan подключён к нужным чатам.')
                 return await self.send(actor, text, banner='data', reply_markup=kb)
             if action == 'erase':
                 nonce = secrets.token_hex(8)
