@@ -91,8 +91,8 @@
   $('import-cancel').onclick=cancel;$('import-another').onclick=cancel;
   $('import-result').onclick=()=>{
     if(!job?.preview)return;
-    state.period='all';state.overview=null;state.overviewAt=0;$('account').value=String(job.account);
-    closeSheets();navigate('chats',{account_id:job.account,chat_id:job.preview.chat_id});
+    state.period='all';state.overview=null;state.overviewAt=0;$('account').value='';
+    closeSheets();navigate('chats',{account_id:0,chat_id:job.preview.chat_id});
   };
   dialog.addEventListener('close',()=>clearTimeout(timer));
 })();

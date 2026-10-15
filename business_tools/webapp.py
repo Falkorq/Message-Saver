@@ -20,6 +20,7 @@ from .avatars import AvatarCache
 from public_pages import render_public_page
 from .export_web import register_import
 from .chat_export import MAX_BYTES
+from .combined_chats import combine_chat_rows, combined_detail, chat_pin_keys
 
 SECTIONS = {'overview': 'Обзор', 'replies': 'Ответы', 'activity': 'Активность',
             'events': 'Удаления и правки', 'media': 'Медиа', 'words': 'Слова',
@@ -70,6 +71,7 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
 
     async def calculate(request, function, *args):
         owner = request['owner']
+        permitted = tuple(sorted(repository.check_account(owner)))
         repository.check_account(owner, args[1] if len(args)>1 else None)
         key = (owner, request.path_qs, repository.db.total_changes, tuple(routes.items()))
         erase_row=repository.db.execute("SELECT 1 FROM sqlite_master WHERE name='account_state'").fetchone()
@@ -109,6 +111,8 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
             if not deferred:slots.release()
         if routes.get(request['actor'])!=owner:
             raise web.HTTPForbidden(text='Приглашение больше не действует.')
+        if tuple(sorted(repository.check_account(owner))) != permitted:
+            raise web.HTTPConflict(text='Список доступных аккаунтов изменился. Обновите экран.')
         repository.check_account(owner, args[1] if len(args)>1 else None)
         erase_after=repository.db.execute('SELECT MAX(erased_through) FROM account_state WHERE owner_id=?',(owner,)).fetchone()[0] if erase_row else None
         if erase_after!=erase_before:raise web.HTTPConflict(text='Данные удалены. Обновите экран.')
@@ -156,17 +160,23 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
         if period not in PERIODS:
             raise ValueError('period')
         account = request.query.get('account')
-        return period, int(account) if account else None
+        return period, int(account) if account and account!='all' else None
 
     def overview_data(repository, owner, account, period, offset, search, sort, pins, favorites):
         now = int(time.time())
-        rows = web_chats(repository, owner, account, period, now)
-        rows.sort(key=lambda r: r['last_at'] or 0, reverse=True)
+        rows = web_chats(repository, owner, account, period, now, include_empty=account is None)
+        contacts = combine_chat_rows(rows) if account is None else rows
+        contacts = [row for row in contacts if period=='all' or row['total_messages']]
+        visible_ids = {row['chat_id'] for row in contacts}
+        rows = [row for row in rows if row['chat_id'] in visible_ids]
+        contacts.sort(key=lambda r: r['last_at'] or 0, reverse=True)
         chats = [{k: r[k] for k in ('account_id', 'chat_id', 'display_name', 'username',
-                  'total_messages', 'owner_messages', 'peer_messages', 'last_at')} for r in rows]
-        for chat, row in zip(chats, rows):
+                  'total_messages', 'owner_messages', 'peer_messages', 'last_at')} for r in contacts]
+        for chat, row in zip(chats, contacts):
             m = row['metrics']
-            chat.update(account_name=service.account_labels.get(row['account_id'], str(row['account_id'])),
+            account_ids=row.get('account_ids',[row['account_id']])
+            chat.update(account_ids=account_ids,avatar_account_id=row.get('avatar_account_id',row['account_id']),
+                        account_name=f'Все ваши аккаунты · {len(account_ids)}' if len(account_ids)>1 else service.account_labels.get(row['account_id'], str(row['account_id'])),
                         totals_basis=row['totals_basis'], undetailed=row['undetailed'],
                         voice=m['p_media_voice'], voice_seconds=m['p_voice_seconds'],
                         voice_missing=m['p_voice_missing'], deleted=m['p_deleted'], own_deleted=m['o_deleted'])
@@ -175,13 +185,13 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
                                   **enrich_overview(repository, owner, account, period, rows, now),
                                   'summary': {'messages': sum(r['total_messages'] for r in rows),
                                   'own': sum(r['owner_messages'] for r in rows),
-                                  'peer': sum(r['peer_messages'] for r in rows), 'chats': len(rows)}}
+                                  'peer': sum(r['peer_messages'] for r in rows), 'chats': len(chats)}}
 
         matches = [c for c in chats if search in (str(c['display_name'] or '')+' '+str(c['username'] or '')+' '+str(c['chat_id'])).casefold()]
-        if favorites: matches=[c for c in matches if f"{c['account_id']}:{c['chat_id']}" in pins]
+        if favorites: matches=[c for c in matches if chat_pin_keys(c).intersection(pins)]
         metric={'messages':'total_messages','peer_messages':'peer_messages','voice':'voice','voice_seconds':'voice_seconds','deleted':'deleted','own_deleted':'own_deleted'}.get(sort,'last_at')
         matches.sort(key=lambda c: c.get(metric) or 0,reverse=True)
-        matches.sort(key=lambda c:f"{c['account_id']}:{c['chat_id']}" in pins,reverse=True)
+        matches.sort(key=lambda c:bool(chat_pin_keys(c).intersection(pins)),reverse=True)
         result['top_chats']=sorted(chats,key=lambda c:c['total_messages'],reverse=True)[:5]
         result['chats'] = matches[offset:offset+50]
         result['pagination'] = dict(offset=offset,limit=50,total=len(matches),has_more=len(matches)>offset+50)
@@ -206,7 +216,7 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
     async def detail(request):
         period, account = filters(request)
         now = int(time.time())
-        if account is None:
+        if account is None and request.query.get('account')!='all':
             raise ValueError('account')
         chat = int(request.match_info['chat'])
         section = request.query.get('section', 'overview')
@@ -221,9 +231,14 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
         data = await calculate(request, detail_data, request['owner'], account, chat, period, now, side, page, section)
         return web.json_response(data)
 
-    def detail_data(repository, owner, account, chat, period, now, side, page, section):
+    def detail_data(repository, owner, account, chat, period, now, side, page, section, analytics_data=None):
+        if account is None:
+            result=combined_detail(repository,owner,chat,period,now,side,page,section,detail_data)
+            if result is None:
+                raise web.HTTPNotFound(text='Чат не найден.')
+            return result
         choices = STAT_VIEWS.get(section, {})
-        data = repository.analytics(owner, account, chat, period, now=now, side=side, page=page, word_limit=50)
+        data = analytics_data if analytics_data is not None else repository.analytics(owner, account, chat, period, now=now, side=side, page=page, word_limit=50)
         if data is None:
             raise web.HTTPNotFound(text='Чат не найден.')
         metrics = data['metrics']
@@ -239,6 +254,7 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
         imported = repository.db.execute('SELECT COUNT(*) FROM business_stats_imported WHERE account_id=? AND chat_id=?',
                                          (account,chat)).fetchone()[0]
         return {'name': service.chat_name(row), 'own': own, 'peer': peer,
+                                  'account_ids':[account], 'avatar_account_id':account,
                                   'imported_messages': imported,
                                   'account_name': service.account_labels.get(account, str(account)),
                                   **enrich_detail(repository, owner, account, chat, period, data, now=now, side=side, page=page),

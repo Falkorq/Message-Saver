@@ -24,7 +24,7 @@ def period_totals(row, metrics, period, now=None):
             'basis': 'retained' if complete else 'detailed', 'complete_scope': complete}
 
 
-def web_chats(repository, owner, account, period, now=None):
+def web_chats(repository, owner, account, period, now=None, include_empty=False):
     rows = repository.filtered_chats(owner, account, 'all', now)
     per_chat = {}
     if period != 'all':
@@ -38,7 +38,7 @@ def web_chats(repository, owner, account, period, now=None):
         totals = period_totals(row, metrics, period, now)
         row.update(metrics=metrics, total_messages=totals['total'], owner_messages=totals['own'],
                    peer_messages=totals['peer'], totals_basis=totals['basis'])
-        if period == 'all' or totals['total']:
+        if include_empty or period == 'all' or totals['total']:
             result.append(row)
     return result
 
