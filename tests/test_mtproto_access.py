@@ -80,7 +80,7 @@ class AccessTests(unittest.IsolatedAsyncioTestCase):
             for data in ('pm:nav:profiles', 'pm:photos:10:0:0:watch', 'pm:check:10:0:watch', 'pm:add'):
                 self.assertFalse(await ui.authorized_callback(call(data)))
             self.assertEqual([b.callback_data for row in ui.main_keyboard(3).keyboard for b in row],
-                             ['pm:nav:tools'])
+                             ['pm:nav:main'])
             self.assertIn('pm:nav:profiles', [b.callback_data for row in ui.main_keyboard(2).keyboard for b in row])
 
     async def test_avatar_fallback_and_cached_mt_photo_require_current_permission(self):

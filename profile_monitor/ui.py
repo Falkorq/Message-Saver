@@ -7,9 +7,10 @@ from pathlib import Path
 
 from telebot import types
 from telebot.asyncio_helper import ApiTelegramException
+from ui_banners import banner_for
 
 from .service import FIELD_NAMES, display_value
-from .style import icon, styled_button, truncate_html
+from .style import icon, styled_button, truncate_html, TEXT_EMOJI_IDS
 
 
 log = logging.getLogger(__name__)
@@ -20,6 +21,18 @@ PLACEHOLDER_PNG = base64.b64decode(
 
 def button(text, data):
     label, icon_id = styled_button(text)
+    if not icon_id:
+        key = ('back' if data in ('pm:nav:home','pm:nav:main') else
+               'profiles' if data.startswith(('pm:nav:profiles','pm:list:')) else
+               'add' if data=='pm:add' else 'watch' if data=='pm:nav:watch' else
+               'history' if data.startswith(('pm:nav:events','pm:hist:','pm:recent:')) else
+               'photos' if data.startswith('pm:photos:') else
+               'check' if data.startswith('pm:check:') else
+               'notifications' if data.startswith('pm:settings:notify') else
+               'settings' if data.startswith(('pm:nav:settings','pm:settings:','pm:set:')) else
+               'watch_disabled' if data.startswith('pm:askoff:') else None)
+        if key:
+            icon_id = TEXT_EMOJI_IDS[key][0]
     return types.InlineKeyboardButton(
         label, callback_data=data, icon_custom_emoji_id=icon_id
     )
@@ -107,12 +120,12 @@ class ProfileUI:
                 return
             try:
                 snapshot, added = await self.service.watch(self.owner(msg.from_user.id), msg.text)
-                result = "добавлен.\nПервый snapshot сохранён без события." if added else "уже отслеживается."
+                result = "добавлен.\nБудем сообщать об изменениях с этого момента." if added else "уже отслеживается."
                 result_icon = icon("success" if added else "add")
                 await self.render_watch(state["chat_id"], state["message_id"],
                                         f"{result_icon} @{escape(str(snapshot.username or snapshot.user_id))} {result}")
             except Exception as exc:
-                await self.render_watch(state["chat_id"], state["message_id"], f"{icon('error')} Не удалось добавить: {escape(str(exc))}")
+                await self.render_watch(state["chat_id"], state["message_id"], f"{icon('error')} Не удалось добавить профиль. Проверьте @username и повторите позже.")
 
         guard = guarded_callback(bot)
 
@@ -122,7 +135,7 @@ class ProfileUI:
             if not await self.authorized_callback(call): return
             self.pending_add.pop(call.from_user.id, None)
             page = call.data[7:]
-            if page == "main": await self.render_main(call.message.chat.id, call.message.message_id)
+            if page in ("main", "home"): await self.render_main(call.message.chat.id, call.message.message_id)
             elif page == "watch": await self.render_watch(call.message.chat.id, call.message.message_id)
             elif page == "settings": await self.render_settings(call.message.chat.id, call.message.message_id)
             elif page == "events": await self.render_recent(call.message.chat.id, call.message.message_id, 0, "main")
@@ -204,9 +217,9 @@ class ProfileUI:
             try:
                 changes = await self.service.check(self.owner(call.from_user.id), int(user_id))
                 note = (f"{icon('changed')} Изменения найдены" if changes
-                        else f"{icon('error')} Изменений нет")
+                        else f"{icon('success')} Проверено. Новых изменений нет")
             except Exception as exc:
-                note = f"{icon('warning')} Ошибка: {escape(str(exc)[:120])}"
+                note = f"{icon('warning')} Сейчас проверить не удалось. Повторите позже."
             await self.render_user(call.message.chat.id, call.message.message_id, int(user_id), int(page), source, note)
 
         @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("pm:askoff:"))
@@ -220,8 +233,8 @@ class ProfileUI:
             row = self.repo.get(self.owner(call.from_user.id), int(user_id))
             name = "@" + row["username"] if row and row["username"] else str(user_id)
             await self.edit_text(call.message.chat.id, call.message.message_id,
-                f"{icon('info')} Вы уверены, что хотите перестать отслеживать {escape(name)}?",
-                keyboard([button("Да, отключить", f"pm:off:{user_id}:{page}:{source}"), button("Отмена", f"pm:user:{user_id}:{page}:{source}")]))
+                f"{icon('info')} Остановить наблюдение за {escape(name)}? Новых проверок и уведомлений не будет. Сохранённая история останется.",
+                keyboard([button("Остановить наблюдение", f"pm:off:{user_id}:{page}:{source}"), button("Отмена", f"pm:user:{user_id}:{page}:{source}")]))
 
         @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("pm:off:"))
         @guard
@@ -289,11 +302,11 @@ class ProfileUI:
                 return
             try:
                 snapshot, added = await self.service.watch(owner_id, args[0])
-                result = "добавлен. Baseline сохранён." if added else "уже отслеживается."
+                result = "добавлен. Будем сообщать об изменениях с этого момента." if added else "уже отслеживается."
                 result_icon = icon("success" if added else "add")
                 await self.send_html(msg.chat.id, f"{result_icon} Профиль @{escape(str(snapshot.username or snapshot.user_id))} {result}")
             except Exception as exc:
-                await self.send_html(msg.chat.id, f"{icon('error')} Не удалось добавить: {escape(str(exc))}")
+                await self.send_html(msg.chat.id, f"{icon('error')} Не удалось добавить профиль. Проверьте @username и повторите позже.")
         elif command == "/unwatch":
             ok = bool(args) and self.service.unwatch(owner_id, args[0])
             await self.send_html(msg.chat.id, (f"{icon('watch_disabled')} Отслеживание отключено" if ok
@@ -309,19 +322,21 @@ class ProfileUI:
             await self.send_html(msg.chat.id, self.history_text(rows) or f"{icon('empty_history')} История пуста")
 
     async def send_main(self, chat_id):
-        with open(self.placeholder, "rb") as image:
-            await self.bot.send_photo(chat_id, image, caption=f"{icon('bot')} <b>Nyan message</b>", parse_mode="HTML", reply_markup=self.main_keyboard(chat_id))
+        with open(banner_for('private_profiles') or self.placeholder, "rb") as image:
+            await self.bot.send_photo(chat_id, image, caption=f"{icon('profiles')} <b>Наблюдение за профилями</b>\n\nСледите за изменениями имени, username, описания и фото выбранных людей. Начните с добавления профиля.", parse_mode="HTML", reply_markup=self.main_keyboard(chat_id))
 
     async def render_main(self, chat_id, message_id):
-        await self.edit_text(chat_id, message_id, f"{icon('bot')} <b>Nyan message</b>", self.main_keyboard(chat_id))
+        await self.edit_text(chat_id, message_id, f"{icon('profiles')} <b>Наблюдение за профилями</b>\n\nСледите за изменениями имени, username, описания и фото выбранных людей. Начните с добавления профиля.", self.main_keyboard(chat_id), banner='private_profiles')
 
     def main_keyboard(self, actor_id=None):
         if not self.profile_access(actor_id):
-            return keyboard([button("🔧 Инструменты", "pm:nav:tools")])
+            return keyboard([button("В меню бота", "pm:nav:main")])
         return keyboard(
-            [button("👤 Профили", "pm:nav:profiles"), button("📡 Наблюдение", "pm:nav:watch")],
-            [button("🗃 События", "pm:nav:events"), button("🔧 Инструменты", "pm:nav:tools")],
-            [button("⚙️ Настройки", "pm:nav:settings")],
+            [button("Мои профили", "pm:nav:profiles"), button("Добавить профиль", "pm:add")],
+            [button("Управление наблюдением", "pm:nav:watch")],
+            [button("Последние изменения", "pm:nav:events")],
+            [button("Настройки наблюдения", "pm:nav:settings")],
+            [button("В меню бота", "pm:nav:main")],
         )
 
     async def render_watch(self, chat_id, message_id, notice=None):
@@ -333,14 +348,14 @@ class ProfileUI:
                 f"\n{icon('recent_changes')} Последние изменения: {changed_icon} {'Есть' if recent else 'Нет'}")
         if notice: text += "\n\n" + notice
         await self.edit_text(chat_id, message_id, text, keyboard(
-            [button("➕ Добавить", "pm:add"), button("👥 Список", "pm:list:0:watch")],
-            [button("🕘 Последние изменения", "pm:recent:0:watch")], [button("◀ Назад", "pm:nav:main")]))
+            [button("Добавить профиль", "pm:add"), button("Открыть список", "pm:list:0:watch")],
+            [button("🕘 Последние изменения", "pm:recent:0:watch")], [button("К разделу профилей", "pm:nav:home")]), banner='watch')
 
     async def render_list(self, chat_id, message_id, page, source="watch"):
         owner_id = self.owner(chat_id)
         rows = self.repo.list(owner_id); total = len(rows); page = max(0, min(page, max(0, (total-1)//PAGE_SIZE)))
         shown = rows[page*PAGE_SIZE:(page+1)*PAGE_SIZE]
-        lines = [f"{icon('list')} <b>Список наблюдения</b>", ""]
+        lines = [f"{icon('list')} <b>Мои профили</b>\nОткройте профиль, чтобы увидеть историю или остановить наблюдение.", ""]
         buttons = []
         for row in shown:
             changed = self.repo.history(owner_id, row["user_id"], limit=1)
@@ -348,12 +363,13 @@ class ProfileUI:
             lines.append(f"{icon('profiles')} {escape(self.row_name(row))}\n{icon('check')} Проверка: {stamp(row['last_checked_at'])}"
                          f"\n{icon('history')} Изменения: {state_icon} {'Есть' if changed else 'Нет'}")
             buttons.append([button(self.row_name(row)[:32], f"pm:user:{row['user_id']}:{page}:{source}")])
-        if not shown: lines.append(f"{icon('empty_list')} Список пуст")
+        if not shown: lines.append("Пока нет профилей. Нажмите «Добавить профиль», чтобы начать.")
         nav = []
         if page: nav.append(button("◀", f"pm:list:{page-1}:{source}"))
         if (page+1)*PAGE_SIZE < total: nav.append(button("▶", f"pm:list:{page+1}:{source}"))
         if nav: buttons.append(nav)
-        buttons.append([button("◀ Назад", f"pm:nav:{source}")])
+        buttons.append([button("Добавить профиль", "pm:add")])
+        buttons.append([button("◀ Назад", f"pm:nav:{'home' if source == 'main' else source}")])
         await self.edit_text(chat_id, message_id, "\n".join(lines), keyboard(*buttons))
 
     async def render_user(self, chat_id, message_id, user_id, page, source="watch", notice=None):
@@ -365,15 +381,15 @@ class ProfileUI:
         bio = row["bio"]
         bio_line = escape(bio[:300]) if bio else f"{icon('unknown_value')} Не указано или недоступно"
         text = (f"{name_line}\n{username_line}\n\n{icon('info')} Статус: "
-                f"{'отслеживается' if row['enabled'] else 'отключён'}\n{icon('tools')} Bio: {bio_line}"
+                f"{'отслеживается' if row['enabled'] else 'отключён'}\n{icon('tools')} Описание: {bio_line}"
                 f"\n{icon('history')} Последняя проверка: {stamp(row['last_checked_at'])}"
                 f"\n{icon('date')} Дата добавления: {stamp(row['added_at'], True)}")
-        if row["last_error"]: text += f"\n{icon('last_error')} Ошибка: {escape(row['last_error'])}"
+        if row["last_error"]: text += "\nПоследняя проверка не удалась. Попробуйте «Проверить сейчас» позже."
         if notice: text += "\n\n" + notice
         await self.edit_text(chat_id, message_id, text, keyboard(
-            [button("🕘 История", f"pm:hist:{user_id}:0:{page}:{source}"), button("🖼 Аватарки", f"pm:photos:{user_id}:0:{page}:{source}")],
+            [button("История изменений", f"pm:hist:{user_id}:0:{page}:{source}"), button("Сохранённые фото", f"pm:photos:{user_id}:0:{page}:{source}")],
             [button("🔄 Проверить сейчас", f"pm:check:{user_id}:{page}:{source}")],
-            [button("🔕 Отключить", f"pm:askoff:{user_id}:{page}:{source}")], [button("◀ Назад", f"pm:list:{page}:{source}")]))
+            [button("Остановить наблюдение", f"pm:askoff:{user_id}:{page}:{source}")], [button("◀ Назад", f"pm:list:{page}:{source}")]))
 
     async def render_history(self, chat_id, message_id, user_id, page, list_page=0, source="watch"):
         rows = self.repo.history_page(self.owner(chat_id), user_id, page, PAGE_SIZE)
@@ -394,8 +410,8 @@ class ProfileUI:
         if page: nav.append(button("◀", f"pm:recent:{page-1}:{source}"))
         if batch_count == PAGE_SIZE: nav.append(button("▶", f"pm:recent:{page+1}:{source}"))
         buttons = [nav] if nav else []
-        buttons.append([button("◀ Назад", f"pm:nav:{source}")])
-        await self.edit_text(chat_id, message_id, text, keyboard(*buttons))
+        buttons.append([button("◀ Назад", f"pm:nav:{'home' if source == 'main' else source}")])
+        await self.edit_text(chat_id, message_id, text, keyboard(*buttons), banner='events')
 
     async def render_photos(self, chat_id, message_id, user_id, index, list_page=0, source="watch"):
         photos = self.repo.photos(self.owner(chat_id), user_id)
@@ -419,34 +435,45 @@ class ProfileUI:
 
     async def render_settings(self, chat_id, message_id):
         row = self.repo.settings(self.owner(chat_id))
-        mins = row["interval_seconds"] // 60
-        text = (f"{icon('settings')} <b>Настройки</b>\n\n{icon('notifications')} Уведомления: "
-                f"{'включены' if row['notifications'] else 'выключены'}\n{icon('interval')} Интервал: "
-                f"{mins if mins < 60 else 1} {'мин' if mins < 60 else 'час'}\n{icon('photo_storage')} "
-                f"Хранение аватарок: {'включено' if row['keep_photos'] else 'выключено'}\n{icon('format')} "
-                f"Формат: {row['notification_format']}")
+        mins = row['interval_seconds'] // 60
+        interval = f'{mins} мин' if mins < 60 else '1 час'
+        format_name = 'кратко' if row['notification_format']=='compact' else 'подробно'
+        text = (f"{icon('settings')} <b>Настройки наблюдения</b>\n\n"
+                f"Уведомления о профилях: {'включены' if row['notifications'] else 'выключены'}\n"
+                f"Проверка: каждые {interval}\n"
+                f"Новые фото: {'сохраняются' if row['keep_photos'] else 'не сохраняются'}\n"
+                f"Текст уведомлений: {format_name}\n\n"
+                'Эти настройки относятся к профилям. Уведомления о сообщениях настраиваются в главном меню бота.')
         await self.edit_text(chat_id, message_id, text, keyboard(
-            [button("🔔 Уведомления", "pm:settings:notify")],
-            [button("⏱ Интервал проверки", "pm:settings:interval")],
-            [button("🖼 Хранение аватарок", "pm:settings:photos")],
-            [button("📝 Формат уведомлений", "pm:settings:format")],
-            [button("◀ Назад", "pm:nav:main")]))
+            [button('Уведомления о профилях', 'pm:settings:notify')],
+            [button('Как часто проверять', 'pm:settings:interval')],
+            [button('Сохранять новые фото', 'pm:settings:photos')],
+            [button('Вид уведомлений', 'pm:settings:format')],
+            [button('К разделу профилей', 'pm:nav:home')]), banner='settings')
 
     async def render_setting(self, chat_id, message_id, field):
-        titles = {"notify": "🔔 Уведомления", "interval": "⏱ Интервал проверки",
-                  "photos": "🖼 Хранение аватарок", "format": "📝 Формат уведомлений"}
-        rows = []
-        if field == "notify": rows = [[button("Включить", "pm:set:notify:1"), button("Выключить", "pm:set:notify:0")]]
-        elif field == "interval": rows = [
-            [button("5 минут", "pm:set:interval:300"), button("15 минут", "pm:set:interval:900")],
-            [button("30 минут", "pm:set:interval:1800"), button("1 час", "pm:set:interval:3600")]]
-        elif field == "photos": rows = [[button("Хранить", "pm:set:photos:1"), button("Не хранить", "pm:set:photos:0")]]
-        elif field == "format": rows = [[button("Компактный", "pm:set:format:compact"), button("Подробный", "pm:set:format:detailed")]]
-        else: return await self.render_settings(chat_id, message_id)
-        rows.append([button("◀ Назад", "pm:nav:settings")])
-        title_icons = {"notify": "notifications", "interval": "interval", "photos": "photo_storage", "format": "format"}
-        await self.edit_text(chat_id, message_id, f"{icon(title_icons[field])} {titles[field].split(' ', 1)[-1]}"
-                             f"\n\n{icon('popup_info')} Выберите значение:", keyboard(*rows))
+        row = self.repo.settings(self.owner(chat_id))
+        if field == 'notify':
+            text = ('Уведомления о профилях\n\n'
+                    + ('Сейчас включены.' if row['notifications'] else 'Сейчас выключены.')
+                    + ' При выключении наблюдение продолжится, но бот не будет присылать найденные изменения.')
+            rows = [[button('Присылать изменения', 'pm:set:notify:1')], [button('Не присылать изменения', 'pm:set:notify:0')]]
+        elif field == 'interval':
+            text = 'Как часто проверять профили\n\nВыберите промежуток между проверками. Если Telegram ограничит запросы, проверка может произойти позже.'
+            rows = [[button('Каждые 5 минут', 'pm:set:interval:300'), button('Каждые 15 минут', 'pm:set:interval:900')],
+                    [button('Каждые 30 минут', 'pm:set:interval:1800'), button('Каждый час', 'pm:set:interval:3600')]]
+        elif field == 'photos':
+            text = ('Сохранение фото профилей\n\n'
+                    + ('Новые фото сохраняются.' if row['keep_photos'] else 'Новые фото не сохраняются.')
+                    + ' Выключение остановит сохранение новых версий. Уже сохранённые фото останутся до истечения срока хранения или удаления ваших данных.')
+            rows = [[button('Сохранять новые фото', 'pm:set:photos:1')], [button('Не сохранять новые фото', 'pm:set:photos:0')]]
+        elif field == 'format':
+            text = 'Вид уведомлений о профилях\n\nКратко: только изменившиеся поля. Подробно: больше сведений о профиле и изменениях.'
+            rows = [[button('Кратко', 'pm:set:format:compact'), button('Подробно', 'pm:set:format:detailed')]]
+        else:
+            return await self.render_settings(chat_id, message_id)
+        rows.append([button('К настройкам наблюдения', 'pm:nav:settings')])
+        await self.edit_text(chat_id, message_id, text, keyboard(*rows), banner='notifications' if field=='notify' else 'settings')
 
     async def render_tools(self, chat_id, message_id):
         text = f"{icon('tools')} <b>Инструменты</b>"
@@ -454,15 +481,15 @@ class ProfileUI:
             rows = self.repo.list(self.owner(chat_id)); errors = sum(bool(r["last_error"]) for r in rows)
             text += f"\n\n{icon('list')} Профилей: {len(rows)}\n{icon('warning')} Ошибок проверки: {errors}"
         await self.edit_text(chat_id, message_id, text, keyboard(
-                                 [button("🔕 Муты", "bt:mutes:0"), button("📊 Статистика", "bt:stats:0")],
-                                 [button("◀ Назад", "pm:nav:main")]))
+                                 [button("Старые правила автоудаления", "bt:mutes:0"), button("📊 Статистика", "bt:stats:0")],
+                                 [button("К разделу профилей", "pm:nav:home")]), banner='data')
 
     async def send_html(self, chat_id, text):
         await self.bot.send_message(chat_id, text, parse_mode="HTML")
 
-    async def edit_text(self, chat_id, message_id, text, markup):
+    async def edit_text(self, chat_id, message_id, text, markup, banner='profiles'):
         # The UI message always remains a photo, allowing avatar versions to replace its media.
-        with open(self.placeholder, "rb") as image:
+        with open(banner_for(banner) or self.placeholder, "rb") as image:
             media = types.InputMediaPhoto(image, caption=truncate_html(text, 900), parse_mode="HTML")
             try:
                 await self.bot.edit_message_media(media, chat_id, message_id, reply_markup=markup)

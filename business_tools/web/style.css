@@ -64,6 +64,10 @@ main{
 }
 .in-chat main{padding-bottom:calc(30px + var(--app-safe-bottom))}
 .in-chat #chat-context{top:var(--app-safe-top)}
+/* Scrolled cards must not show through the area occupied by native Telegram UI. */
+.in-chat::before{content:'';position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:680px;height:var(--app-safe-top);background:var(--bg);z-index:12;pointer-events:none}
+.in-chat #chat-context::before,.in-chat .detail-navigation::before{content:'';position:absolute;top:0;bottom:0;left:calc(0px - var(--app-gutter) - var(--app-safe-left));right:calc(0px - var(--app-gutter) - var(--app-safe-right));background:var(--bg);z-index:-1;pointer-events:none}
+.in-chat .detail-navigation::before{left:calc(4px - var(--app-gutter) - var(--app-safe-left));right:calc(4px - var(--app-gutter) - var(--app-safe-right))}
 .detail-navigation{top:calc(var(--contact-header-height,86px) + var(--app-safe-top))}
 .sheet{
   max-height:calc(var(--tg-viewport-height,100dvh) - var(--app-safe-top) - 12px);

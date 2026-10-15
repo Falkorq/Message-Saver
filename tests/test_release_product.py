@@ -23,8 +23,8 @@ class OptionalModuleTests(unittest.IsolatedAsyncioTestCase):
             await module.start();self.assertEqual(module.state,'disabled');await module.close()
         ui=PublicUI(h.bot,h.db,h.routes,{},h.product,h.inbox,lambda:None,lambda:module,MTProtoAccess(h.routes,{100}))
         await ui.welcome(999)
-        self.assertIn('по приглашению',h.bot.send_message.await_args.args[1])
-        self.assertNotIn('TELEGRAM_SESSION',h.bot.send_message.await_args.args[1])
+        self.assertIn('по приглашению',h.bot.send_photo.await_args.kwargs['caption'])
+        self.assertNotIn('TELEGRAM_SESSION',h.bot.send_photo.await_args.kwargs['caption'])
 
     async def test_failed_session_is_background_state_and_recovers(self):
         module=object.__new__(ProfileMonitorModule)
@@ -117,7 +117,7 @@ class ProductTests(unittest.IsolatedAsyncioTestCase):
         h.repo._legacy_mute(1,dict(first,account_id=101),0)
         ui=PublicUI(h.bot,h.db,h.routes,{},h.product,h.inbox,lambda:SimpleNamespace(repo=h.repo),lambda:None,MTProtoAccess(h.routes,{100}))
         await ui.page(100,'rules')
-        buttons=str(h.bot.send_message.await_args.kwargs['reply_markup'].to_dict())
+        buttons=str(h.bot.send_photo.await_args.kwargs['reply_markup'].to_dict())
         self.assertIn('ny:unrule:100:200',buttons)
         self.assertIn('ny:unrule:101:200',buttons)
 
@@ -126,6 +126,7 @@ class ProductTests(unittest.IsolatedAsyncioTestCase):
         handlers={}
         class Bot:
             send_message=AsyncMock()
+            send_photo=AsyncMock()
             answer_callback_query=AsyncMock()
             def message_handler(self,**kwargs):return lambda fn:fn
             def callback_query_handler(self,**kwargs):

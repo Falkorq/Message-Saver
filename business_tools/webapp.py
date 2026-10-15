@@ -17,6 +17,7 @@ from .analytics import PERIODS
 from .service import STAT_VIEWS
 from .web_metrics import enrich_overview, enrich_detail, web_chats, period_totals
 from .avatars import AvatarCache
+from public_pages import render_public_page
 
 SECTIONS = {'overview': 'Обзор', 'replies': 'Ответы', 'activity': 'Активность',
             'events': 'Удаления и правки', 'media': 'Медиа', 'words': 'Слова',
@@ -241,8 +242,11 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
                                   'sections': SECTIONS, 'page': page, 'generated_at':now}
 
     async def asset(request):
+        page = {'/privacy':'privacy', '/privacy.html':'privacy', '/help':'help', '/terms':'terms'}.get(request.path)
+        if page:
+            return web.Response(text=render_public_page(page), content_type='text/html')
         filename = 'privacy.html' if request.path=='/privacy' else request.match_info.get('file', 'index.html')
-        if filename not in ('privacy.html','index.html', 'app.js', 'material.js', 'style.css', 'nyan-icon.jpg', 'icons.svg',
+        if filename not in ('privacy.html','index.html', 'app.js', 'material.js', 'style.css', 'public.css', 'nyan-icon.jpg', 'icons.svg',
                             'nunito-400.ttf', 'nunito-600.ttf', 'nunito-700.ttf'):
             raise web.HTTPNotFound()
         return web.FileResponse(assets / filename)

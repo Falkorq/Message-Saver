@@ -38,7 +38,7 @@ class Harness:
         self.db.commit()
         self.inbox = DurableInbox(self.db,self.cipher)
         self.product = ProductState(self.db,self.routes)
-        self.bot = SimpleNamespace(send_message=AsyncMock(),process_new_updates=AsyncMock())
+        self.bot = SimpleNamespace(send_message=AsyncMock(),send_photo=AsyncMock(),process_new_updates=AsyncMock())
         ctx = dict(db=self.db,db_path=Path(path),json=json,time=time,asyncio=asyncio,types=types,
                    message_cipher=self.cipher,routes=self.routes,product=self.product,inbox=self.inbox,
                    business_tools=SimpleNamespace(repo=self.repo,service=BusinessToolsService(self.bot,self.repo,None,{}),
