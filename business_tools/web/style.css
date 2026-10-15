@@ -40,3 +40,44 @@ body.sheet-open{overflow:hidden}.chart-svg text{font-size:14px}.legend .peer i{b
 .avatar.has-photo{overflow:hidden}.avatar img{width:100%;height:100%;display:block;object-fit:cover}.avatar.has-photo img{animation:avatar-in .18s ease-out}@keyframes avatar-in{from{opacity:.3}to{opacity:1}}
 
 .brand{min-height:44px} #status button{min-height:44px;margin:8px 8px 0 0} #status{overflow-wrap:anywhere}
+
+/* Fullscreen: OS safe area + Telegram controls, including landscape cutouts. */
+:root{
+  --app-safe-top:calc(max(env(safe-area-inset-top,0px),var(--tg-safe-area-inset-top,0px)) + var(--tg-content-safe-area-inset-top,0px));
+  --app-safe-bottom:calc(max(env(safe-area-inset-bottom,0px),var(--tg-safe-area-inset-bottom,0px)) + var(--tg-content-safe-area-inset-bottom,0px));
+  --app-safe-left:calc(max(env(safe-area-inset-left,0px),var(--tg-safe-area-inset-left,0px)) + var(--tg-content-safe-area-inset-left,0px));
+  --app-safe-right:calc(max(env(safe-area-inset-right,0px),var(--tg-safe-area-inset-right,0px)) + var(--tg-content-safe-area-inset-right,0px));
+  --app-gutter:20px;
+}
+main{
+  min-height:var(--tg-viewport-stable-height,100dvh);
+  padding-top:var(--app-safe-top);
+  padding-bottom:calc(116px + var(--app-safe-bottom));
+  padding-left:calc(var(--app-gutter) + var(--app-safe-left));
+  padding-right:calc(var(--app-gutter) + var(--app-safe-right));
+}
+.bottom-nav{
+  padding-left:calc(var(--app-gutter) + var(--app-safe-left));
+  padding-right:calc(var(--app-gutter) + var(--app-safe-right));
+  padding-bottom:calc(12px + var(--app-safe-bottom));
+  grid-template-columns:repeat(3,minmax(0,1fr));
+}
+.in-chat main{padding-bottom:calc(30px + var(--app-safe-bottom))}
+.in-chat #chat-context{top:var(--app-safe-top)}
+.detail-navigation{top:calc(var(--contact-header-height,86px) + var(--app-safe-top))}
+.sheet{
+  max-height:calc(var(--tg-viewport-height,100dvh) - var(--app-safe-top) - 12px);
+  padding-left:calc(20px + var(--app-safe-left));
+  padding-right:calc(20px + var(--app-safe-right));
+  padding-bottom:calc(24px + var(--app-safe-bottom));
+}
+/* Dock feedback belongs to the icon capsule, not a second full-button layer. */
+.bottom-nav button{min-width:0}
+.bottom-nav button md-ripple{display:none}
+.bottom-nav button:active{border-radius:20px}
+.bottom-nav button:active .ui-icon{background:var(--soft);color:var(--accent)}
+@media(hover:hover) and (pointer:fine){
+  .bottom-nav button:hover .ui-icon{background:var(--soft);color:var(--accent)}
+}
+@media(min-width:760px){:root{--app-gutter:30px}}
+@media(max-width:360px){:root{--app-gutter:16px}}

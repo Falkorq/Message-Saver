@@ -1,4 +1,17 @@
 const tg = window.Telegram?.WebApp;
+// System insets and Telegram controls occupy separate parts of the viewport.
+function syncTelegramInsets(){
+  for(const [property,prefix] of [['safeAreaInset','--tg-safe-area-inset-'],['contentSafeAreaInset','--tg-content-safe-area-inset-']]){
+    const insets=tg?.[property];
+    if(!insets)continue;
+    for(const side of ['top','bottom','left','right']){
+      const value=insets[side];
+      if(Number.isFinite(value) && value>=0)document.documentElement.style.setProperty(prefix+side,`${value}px`);
+    }
+  }
+}
+syncTelegramInsets();
+if(tg?.onEvent)for(const event of ['safeAreaChanged','contentSafeAreaChanged','viewportChanged','fullscreenChanged'])tg.onEvent(event,syncTelegramInsets);
 const $ = id => document.getElementById(id);
 const state = {screen:'chats', selected:null, section:'overview', period:'30', side:'both', wordPage:0, sequence:0, overview:null, detail:null, search:'', sort:'recent', rank:'total_messages', visible:50, controller:null};
 const screenNames = {overview:'Обзор',chats:'Чаты',mine:'Моя активность',rankings:'Рейтинги',info:'Об учёте'};
