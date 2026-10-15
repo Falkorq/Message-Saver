@@ -1,4 +1,4 @@
-"""Read-only Telegram Mini App served in the bot's event loop."""
+"""Telegram statistics Mini App with explicit, authenticated history imports."""
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict, deque, OrderedDict
@@ -18,6 +18,8 @@ from .service import STAT_VIEWS
 from .web_metrics import enrich_overview, enrich_detail, web_chats, period_totals
 from .avatars import AvatarCache
 from public_pages import render_public_page
+from .export_web import register_import
+from .chat_export import MAX_BYTES
 
 SECTIONS = {'overview': 'Обзор', 'replies': 'Ответы', 'activity': 'Активность',
             'events': 'Удаления и правки', 'media': 'Медиа', 'words': 'Слова',
@@ -234,7 +236,10 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
             media_count = len({k[len(f'{s}_media_'):] for s in sides
                                for k, n in metrics.items() if n and k.startswith(f'{s}_media_')})
         own, peer = totals['own'], totals['peer']
+        imported = repository.db.execute('SELECT COUNT(*) FROM business_stats_imported WHERE account_id=? AND chat_id=?',
+                                         (account,chat)).fetchone()[0]
         return {'name': service.chat_name(row), 'own': own, 'peer': peer,
+                                  'imported_messages': imported,
                                   'account_name': service.account_labels.get(account, str(account)),
                                   **enrich_detail(repository, owner, account, chat, period, data, now=now, side=side, page=page),
                                   'days': data['activity_days'],
@@ -246,7 +251,7 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
         if page:
             return web.Response(text=render_public_page(page), content_type='text/html')
         filename = 'privacy.html' if request.path=='/privacy' else request.match_info.get('file', 'index.html')
-        if filename not in ('privacy.html','index.html', 'app.js', 'material.js', 'style.css', 'public.css', 'nyan-icon.jpg', 'icons.svg',
+        if filename not in ('privacy.html','index.html', 'app.js', 'import.js', 'material.js', 'style.css', 'public.css', 'nyan-icon.jpg', 'icons.svg',
                             'nunito-400.ttf', 'nunito-600.ttf', 'nunito-700.ttf'):
             raise web.HTTPNotFound()
         return web.FileResponse(assets / filename)
@@ -272,7 +277,8 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
         await avatars.close()
         pool.shutdown(wait=False, cancel_futures=True)
 
-    app = web.Application(middlewares=[protect], client_max_size=16384)
+    app = web.Application(middlewares=[protect], client_max_size=MAX_BYTES)
+    register_import(app,repository,routes,product,cache.clear)
     app.on_startup.append(start_avatars)
     app.on_cleanup.append(close_avatars)
     async def health(request):

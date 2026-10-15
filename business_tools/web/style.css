@@ -85,3 +85,5 @@ main{
 }
 @media(min-width:760px){:root{--app-gutter:30px}}
 @media(max-width:360px){:root{--app-gutter:16px}}
+
+.import-form{display:grid;gap:12px;margin:20px 0}.import-form label{font-weight:700}.import-form select,.import-form input{width:100%;min-width:0;font:inherit;font-size:16px;color:var(--text);background:var(--subtle);border:1px solid var(--line);border-radius:14px;padding:12px}.import-form input::file-selector-button{font:inherit;border:0;border-radius:10px;padding:8px;margin-right:8px;background:var(--soft);color:var(--accent)}.import-actions{display:flex;flex-wrap:wrap;gap:10px;margin:16px 0}#import-error{color:var(--text);border-left:3px solid var(--accent);padding-left:12px}#import-preview{overflow-wrap:anywhere}#import-progress{margin:16px 0;font-weight:700}

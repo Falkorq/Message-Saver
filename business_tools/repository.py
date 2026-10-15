@@ -106,6 +106,7 @@ class BusinessToolsRepository(AnalyticsRepository):
     def _record_message(self, connection_id, account_id, owner_id, message_id, record):
         self.check_account(owner_id, account_id)
         self.check_chat_owner(owner_id,account_id,record['chat_id'])
+        connection_id = self.statistics_connection(connection_id,account_id,record['chat_id'],message_id)
         chars, words = text_metrics(record)
         now = int(record.get('_observed_at') or time.time())
         inserted = self.db.execute(

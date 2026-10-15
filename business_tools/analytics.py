@@ -59,6 +59,12 @@ def day_is_known(windows, stamp, now):
 
 class AnalyticsRepository:
     def migrate_analytics(self):
+        self.db.executescript('''
+          CREATE TABLE IF NOT EXISTS business_stats_imported(
+            account_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,
+            connection_id TEXT NOT NULL,imported_at INTEGER NOT NULL,
+            PRIMARY KEY(account_id,chat_id,message_id));
+        ''')
         if 'first_observed_at' not in {r[1] for r in self.db.execute('PRAGMA table_info(business_chat_stats)')}:
             self.db.execute('ALTER TABLE business_chat_stats ADD COLUMN first_observed_at INTEGER')
             # Existing chats must never become "first seen today" just because
@@ -81,6 +87,8 @@ class AnalyticsRepository:
             if name not in columns:
                 self.db.execute(f"ALTER TABLE business_stats_seen ADD COLUMN {name} {definition}")
         self.db.executescript("""
+        CREATE INDEX IF NOT EXISTS business_seen_identity
+          ON business_stats_seen(account_id,chat_id,message_id);
         CREATE INDEX IF NOT EXISTS business_seen_order
           ON business_stats_seen(account_id,chat_id,sent_at,connection_id,message_id) WHERE detailed=1;
         CREATE INDEX IF NOT EXISTS business_seen_last_live
@@ -151,6 +159,12 @@ class AnalyticsRepository:
                         (stamp,stamp,account_id,chat_id))
 
     def _daily_add(self, account_id, chat_id, day, values, sign=1):
+        pending = getattr(self, '_import_metrics', None)
+        if pending is not None:
+            metrics = pending.setdefault((account_id,chat_id,day),Counter())
+            for key,value in values.items():
+                metrics[key] = max(metrics[key],value) if key.endswith('_max') else metrics[key]+sign*value
+            return
         row = self.db.execute("SELECT metrics FROM business_stats_daily WHERE account_id=? AND chat_id=? AND day=?",
                               (account_id, chat_id, day)).fetchone()
         metrics = Counter(json.loads(row[0]) if row else {})
@@ -199,6 +213,11 @@ class AnalyticsRepository:
     def stats_source(self, record):
         cipher = getattr(self, 'message_cipher', None)
         return cipher.stats_record(record) if cipher else record
+
+    def statistics_connection(self, connection_id, account_id, chat_id, message_id):
+        imported = self.db.execute('SELECT connection_id FROM business_stats_imported '
+            'WHERE account_id=? AND chat_id=? AND message_id=?', (account_id,chat_id,message_id)).fetchone()
+        return imported[0] if imported else connection_id
 
     def record_details(self, connection_id, account_id, message_id, record):
         from .repository import STOP_WORDS
@@ -249,6 +268,7 @@ class AnalyticsRepository:
 
     def record_event(self, owner_id, account_id, connection_id, chat_id, message_id,
                      event, record=None, detected_at=None):
+        connection_id = self.statistics_connection(connection_id,account_id,chat_id,message_id)
         if record:
             record = self.stats_source(record)
         self.check_account(owner_id, account_id)

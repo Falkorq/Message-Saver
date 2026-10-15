@@ -97,9 +97,11 @@ class ProductState:
                     for table in ('messages','message_versions','business_stats_seen','business_stats_events','business_self_deletions'):
                         self.db.execute(f'DELETE FROM {table} WHERE connection_id=?', (connection,))
                 for table in ('business_chat_stats','business_stats_days','business_stats_words','business_stats_daily',
-                              'business_stats_chat_metrics','business_stats_side_words','business_mutes','business_avatar_cache','observation_intervals'):
+                              'business_stats_chat_metrics','business_stats_side_words','business_mutes','business_avatar_cache','observation_intervals',
+                              'business_stats_imported','business_stats_seen'):
                     if self.db.execute('SELECT 1 FROM sqlite_master WHERE name=?', (table,)).fetchone():
                         self.db.execute(f'DELETE FROM {table} WHERE account_id=?', (account,))
+                self.db.execute('DELETE FROM business_stats_events WHERE connection_id=?', (f'nyan-export:{account}',))
                 self.db.execute('UPDATE account_state SET last_event=NULL,since=? WHERE account_id=?', (int(time.time()),account))
             self.db.execute('DELETE FROM outbox WHERE recipient_id=?', (owner,))
             for table in ('profile_watchers','profile_changes','profile_photos','profile_settings'):
