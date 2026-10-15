@@ -271,8 +271,8 @@ class PublicUI:
                     'В некоторых версиях раздел называется «Автоматизация чатов».\n'
                     '2. Выберите Nyan и укажите чаты, которые он будет учитывать.\n'
                     '3. Вернитесь сюда и нажмите «Проверить подключение».\n\n'
-                    'Для проверки отправьте сообщение в одном из выбранных чатов, затем измените и удалите его. '
-                    'Nyan должен прислать уведомления. Разрешать удаление сообщений самому боту не нужно.')
+                    'Для проверки уведомлений попросите собеседника отправить сообщение в выбранном чате, изменить и удалить его. '
+                    'О своих сообщениях бот по умолчанию не уведомляет. Разрешать удаление сообщений самому боту не нужно.')
             kb.row(self.button('Проверить подключение', callback_data='ny:status'))
             self.link(kb, 'Инструкция с пояснениями', 'help#connect')
         elif action == 'status':
@@ -308,7 +308,7 @@ class PublicUI:
             row = self.db.execute('SELECT * FROM notification_preferences WHERE owner_id=?', (owner,)).fetchone()
             settings = dict(row) if row else dict(paused=0, edits=1, deletions=1, peers=1)
             own = self.db.execute('SELECT only_others FROM settings WHERE recipient_id=?', (owner,)).fetchone()
-            own_enabled = not (own and own[0])
+            own_enabled = not (own[0] if own else True)
             event_names = [name for field,name in [('edits','правки'),('deletions','удаления')] if settings[field]]
             author_names = (['ваши'] if own_enabled else []) + (['собеседников'] if settings['peers'] else [])
             text = ('Уведомления о сообщениях\n\n'
@@ -379,7 +379,7 @@ class PublicUI:
                 kb.row(self.button('Управлять моими данными', callback_data='ny:data'))
         elif action == 'help':
             text = ('Помощь\n\n'
-                    'Нет статистики или уведомлений? Проверьте подключение и отправьте тестовое сообщение в выбранном чате.\n\n'
+                    'Нет статистики или уведомлений? Проверьте подключение. Для проверки уведомлений попросите собеседника изменить или удалить тестовое сообщение в выбранном чате.\n\n'
                     'Хотите меньше уведомлений? Откройте их настройки. Чтобы остановить само сохранение сообщений, выберите «Мои данные».\n\n'
                     + self.support())
             if allowed:
@@ -449,7 +449,7 @@ class PublicUI:
                     field = parts[1]
                     if field == 'own':
                         old = self.db.execute('SELECT only_others FROM settings WHERE recipient_id=?',(owner,)).fetchone()
-                        value = int(bool(old and old[0]))
+                        value = int(bool(old[0] if old else True))
                     else:
                         old = self.db.execute('SELECT '+field+' FROM notification_preferences WHERE owner_id=?',(owner,)).fetchone()
                         value = 1-int(old[0] if old else (0 if field=='paused' else 1))

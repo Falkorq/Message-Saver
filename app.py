@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 CREATE TABLE IF NOT EXISTS settings (
     recipient_id INTEGER PRIMARY KEY,
-    only_others INTEGER NOT NULL DEFAULT 0
+    only_others INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS style_emojis (
     recipient_id INTEGER NOT NULL,
@@ -239,7 +239,7 @@ def notification_target(payload):
         return None
     if not product.notifications(payload.get("owner_id") or routes.get(payload.get("account_id")), payload.get("event"), ((payload.get("old") or payload.get("new") or {}).get("sender_id")==payload.get("account_id")) if payload.get("account_id") is not None else None):
         return None
-    if payload.get('account_id') is not None and bool((db.execute('SELECT only_others FROM settings WHERE recipient_id=?',(routes.get(payload['account_id']),)).fetchone() or [0])[0]) and (payload.get('old') or {}).get('sender_id') == payload['account_id']:
+    if payload.get('account_id') is not None and only_others_enabled(routes.get(payload['account_id'])) and (payload.get('old') or payload.get('new') or {}).get('sender_id') == payload['account_id']:
         return None
     if payload.get("account_id") is not None and not product.allows(payload["account_id"]):
         return None
@@ -339,7 +339,7 @@ def message_details(msg):
 
 def only_others_enabled(recipient_id):
     row = db.execute("SELECT only_others FROM settings WHERE recipient_id=?", (recipient_id,)).fetchone()
-    return bool(row["only_others"]) if row else False
+    return bool(row["only_others"]) if row else True
 
 
 def is_own_message(connection_id, record):

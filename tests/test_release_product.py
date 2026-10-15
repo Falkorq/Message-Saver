@@ -68,6 +68,7 @@ class OptionalModuleTests(unittest.IsolatedAsyncioTestCase):
 class ProductTests(unittest.IsolatedAsyncioTestCase):
     async def test_peer_notification_setting_preserves_collection_and_own_notifications(self):
         h=Harness();self.addCleanup(h.close)
+        h.db.execute('INSERT INTO settings(recipient_id,only_others) VALUES(1,0)')
         h.db.execute('INSERT INTO notification_preferences(owner_id,peers) VALUES(1,0)');h.db.commit()
         await h.feed(h.message())
         await h.feed(h.message(2,'правка',int(time.time())))

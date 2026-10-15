@@ -110,11 +110,11 @@ class AccessTests(unittest.IsolatedAsyncioTestCase):
 
     def test_profile_outbox_is_checked_separately_from_business_notifications(self):
         source = Path(__file__).resolve().parents[1] / 'app.py'
-        node = next(n for n in ast.parse(source.read_text(encoding='utf-8')).body
-                    if isinstance(n, ast.FunctionDef) and n.name == 'notification_target')
+        nodes = [n for n in ast.parse(source.read_text(encoding='utf-8')).body
+                 if isinstance(n, ast.FunctionDef) and n.name in ('notification_target', 'only_others_enabled')]
         self.db.execute('CREATE TABLE IF NOT EXISTS settings(recipient_id INTEGER PRIMARY KEY,only_others INTEGER DEFAULT 0)')
         context = {'db':self.db,'mtproto_access': self.policy, 'routes': self.routes, 'product':SimpleNamespace(notifications=lambda *args:True,allows=lambda *args:True)}
-        exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), context)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), context)
         target = context['notification_target']
         self.assertIsNone(target({'event': 'profile_change', 'owner_id': 3}))
         self.assertEqual(target({'event': 'profile_change', 'owner_id': 2}), 2)
