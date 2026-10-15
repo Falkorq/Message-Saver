@@ -11,7 +11,7 @@ from telebot import types
 from telebot.asyncio_helper import ApiTelegramException
 from profile_monitor.style import TEXT_EMOJI_IDS
 from ui_banners import banner_for, banner_cache
-from public_pages import public_url, support_contact
+from public_pages import PROJECT_CHANNEL_URL, public_url, support_contact
 from ui_text import menu_html, telegram_length, without_custom_emoji
 
 
@@ -68,6 +68,8 @@ class PublicUI:
         icon_id = TEXT_EMOJI_IDS['chat_stats'][0] if kwargs.get('web_app') else icons.get(action, icons.get(action.split(':')[1] if action.startswith('set:') else action.split(':')[0]))
         if text == 'Назад':
             icon_id = TEXT_EMOJI_IDS['back'][0]
+        elif kwargs.get('url') == PROJECT_CHANNEL_URL:
+            icon_id = TEXT_EMOJI_IDS['notifications'][0]
         elif text == 'Ещё правила':
             icon_id = '5877468380125990242'
         elif text == 'Отмена':
@@ -194,6 +196,7 @@ class PublicUI:
             kb.row(self.button('Проверить приглашение', callback_data='ny:menu'))
             kb.row(self.button('Помощь', callback_data='ny:help'),
                    self.button('Данные и приватность', callback_data='ny:privacy'))
+        kb.row(self.button('Канал проекта', url=PROJECT_CHANNEL_URL))
         return kb
 
     def back(self, kb, target='menu', label='В главное меню'):
@@ -379,6 +382,7 @@ class PublicUI:
             if allowed:
                 kb.row(self.button('Управлять моими данными', callback_data='ny:data'))
         elif action == 'help':
+            kb.row(self.button('Канал проекта', url=PROJECT_CHANNEL_URL))
             text = ('Помощь\n\n'
                     'Нет статистики или уведомлений? Проверьте подключение. Для проверки уведомлений попросите собеседника изменить или удалить тестовое сообщение в выбранном чате.\n\n'
                     'Хотите меньше уведомлений? Откройте их настройки. Чтобы остановить само сохранение сообщений, выберите «Мои данные».\n\n'

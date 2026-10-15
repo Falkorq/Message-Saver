@@ -4,6 +4,8 @@ import re
 from html import escape
 from urllib.parse import urlsplit
 
+PROJECT_CHANNEL_URL = 'https://t.me/nyanPJ'
+
 
 def support_contact():
     return os.getenv('SUPPORT_CONTACT', '').strip() or '@nyaaa_moe'
@@ -35,6 +37,7 @@ def render_public_page(page):
     if re.fullmatch(r'@[A-Za-z0-9_]{5,32}', raw_contact):
         contact = f'<a href="https://t.me/{raw_contact[1:]}">{contact}</a>'
     support = 'Связаться с поддержкой: ' + contact
+    support += f'</p><p>Новости и обновления: <a href="{PROJECT_CHANNEL_URL}">канал проекта @nyanPJ</a>.'
     try:
         retention = max(1, int(os.getenv('RETENTION_DAYS', '90')))
     except ValueError:

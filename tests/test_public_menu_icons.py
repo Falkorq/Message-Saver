@@ -25,7 +25,8 @@ class PublicMenuIconTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({b['callback_data'] for b in buttons if 'callback_data' in b},
                          {'ny:connect', 'ny:status', 'ny:notifications', 'ny:help', 'ny:data'})
         self.assertTrue(all('<' not in b['text'] for b in buttons))
-        self.assertEqual(len(ui.keyboard(False).keyboard), 2)
+        self.assertEqual(len(ui.keyboard(False).keyboard), 3)
+        self.assertEqual(buttons[-1]['url'], 'https://t.me/nyanPJ')
 
     async def test_premium_rejection_retries_plain_keyboard_and_disables_icons(self):
         ui = self.ui()
@@ -37,8 +38,8 @@ class PublicMenuIconTests(unittest.IsolatedAsyncioTestCase):
         retry = ui.bot.send_message.await_args.kwargs['reply_markup'].to_dict()
         self.assertTrue(all('icon_custom_emoji_id' not in b for row in retry['inline_keyboard'] for b in row))
         self.assertEqual(keyboard.to_dict(), original)
-        self.assertEqual([b['callback_data'] for row in retry['inline_keyboard'] for b in row],
-                         [b['callback_data'] for row in original['inline_keyboard'] for b in row])
+        self.assertEqual([(b.get('callback_data'), b.get('url')) for row in retry['inline_keyboard'] for b in row],
+                         [(b.get('callback_data'), b.get('url')) for row in original['inline_keyboard'] for b in row])
         self.assertFalse(ui.button_icons_enabled)
         await ui.send(100, 'Next', reply_markup=keyboard)
         self.assertTrue(all('icon_custom_emoji_id' not in b for row in ui.bot.send_message.await_args.kwargs['reply_markup'].to_dict()['inline_keyboard'] for b in row))
