@@ -11,7 +11,7 @@ from telebot import types
 from telebot.asyncio_helper import ApiTelegramException
 from profile_monitor.style import TEXT_EMOJI_IDS
 from ui_banners import banner_for, banner_cache
-from public_pages import public_url
+from public_pages import public_url, support_contact
 from ui_text import menu_html, telegram_length, without_custom_emoji
 
 
@@ -238,8 +238,7 @@ class PublicUI:
 
     @staticmethod
     def support():
-        contact = os.getenv('SUPPORT_CONTACT', '').strip()
-        return f'Написать в поддержку: {contact}' if contact else 'За помощью обратитесь к человеку, который пригласил вас в Nyan.'
+        return f'Написать в поддержку: {support_contact()}'
 
     async def page(self, actor, action):
         if action == 'connect_guide':

@@ -77,7 +77,7 @@ cp .env.example .env
 | `MY_ACCOUNT_IDS` | ID подключаемых аккаунтов через запятую |
 | `MESSAGE_ENCRYPTION_KEY` | Ключ хранения; при первой установке создайте командой ниже |
 | `BOT_USERNAME` | Username бота для переходов из Mini App |
-| `SUPPORT_CONTACT` | Реальный контакт поддержки |
+| `SUPPORT_CONTACT` | Контакт поддержки, по умолчанию `@nyaaa_moe` |
 
 Остальные параметры находятся в [`.env.example`](.env.example). Настройка HTTPS и адреса Mini App описана в [отдельной инструкции](docs/MINI_APP.md).
 

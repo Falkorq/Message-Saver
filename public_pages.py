@@ -5,6 +5,10 @@ from html import escape
 from urllib.parse import urlsplit
 
 
+def support_contact():
+    return os.getenv('SUPPORT_CONTACT', '').strip() or '@nyaaa_moe'
+
+
 def public_url(page):
     base = (os.getenv('PUBLIC_SITE_URL') or os.getenv('WEBAPP_URL') or '').strip().rstrip('/')
     try:
@@ -26,8 +30,11 @@ def section(slug, title, body):
 
 
 def render_public_page(page):
-    contact = escape(os.getenv('SUPPORT_CONTACT', '').strip())
-    support = ('Связаться с оператором: ' + contact) if contact else 'Свяжитесь с человеком, который пригласил вас в Nyan. Он поможет обратиться к оператору.'
+    raw_contact = support_contact()
+    contact = escape(raw_contact)
+    if re.fullmatch(r'@[A-Za-z0-9_]{5,32}', raw_contact):
+        contact = f'<a href="https://t.me/{raw_contact[1:]}">{contact}</a>'
+    support = 'Связаться с поддержкой: ' + contact
     try:
         retention = max(1, int(os.getenv('RETENTION_DAYS', '90')))
     except ValueError:
