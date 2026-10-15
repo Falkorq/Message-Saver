@@ -7,7 +7,7 @@ from pathlib import Path
 
 from telebot import types
 from telebot.asyncio_helper import ApiTelegramException
-from ui_banners import banner_for
+from ui_banners import banner_for, banner_cache
 
 from .service import FIELD_NAMES, display_value
 from .style import icon, styled_button, truncate_html, TEXT_EMOJI_IDS
@@ -79,6 +79,7 @@ class ProfileUI:
     def __init__(self, bot, service, repository, owner_routes, placeholder_dir, banner_path=None,
                  access_policy=None):
         self.bot = bot
+        self.banners = banner_cache(bot)
         self.service = service
         self.repo = repository
         self.owner_routes = owner_routes
@@ -322,8 +323,9 @@ class ProfileUI:
             await self.send_html(msg.chat.id, self.history_text(rows) or f"{icon('empty_history')} История пуста")
 
     async def send_main(self, chat_id):
-        with open(banner_for('private_profiles') or self.placeholder, "rb") as image:
-            await self.bot.send_photo(chat_id, image, caption=f"{icon('profiles')} <b>Наблюдение за профилями</b>\n\nСледите за изменениями имени, username, описания и фото выбранных людей. Начните с добавления профиля.", parse_mode="HTML", reply_markup=self.main_keyboard(chat_id))
+        async def send(image):
+            return await self.bot.send_photo(chat_id, image, caption=f"{icon('profiles')} <b>Наблюдение за профилями</b>\n\nСледите за изменениями имени, username, описания и фото выбранных людей. Начните с добавления профиля.", parse_mode="HTML", reply_markup=self.main_keyboard(chat_id))
+        return await self.banners.use(banner_for('private_profiles') or self.placeholder, send)
 
     async def render_main(self, chat_id, message_id):
         await self.edit_text(chat_id, message_id, f"{icon('profiles')} <b>Наблюдение за профилями</b>\n\nСледите за изменениями имени, username, описания и фото выбранных людей. Начните с добавления профиля.", self.main_keyboard(chat_id), banner='private_profiles')
@@ -489,13 +491,14 @@ class ProfileUI:
 
     async def edit_text(self, chat_id, message_id, text, markup, banner='profiles'):
         # The UI message always remains a photo, allowing avatar versions to replace its media.
-        with open(banner_for(banner) or self.placeholder, "rb") as image:
+        async def update(image):
             media = types.InputMediaPhoto(image, caption=truncate_html(text, 900), parse_mode="HTML")
             try:
-                await self.bot.edit_message_media(media, chat_id, message_id, reply_markup=markup)
+                return await self.bot.edit_message_media(media, chat_id, message_id, reply_markup=markup)
             except ApiTelegramException as exc:
                 if exc.error_code != 400 or "message is not modified" not in str(exc).lower():
                     raise
+        return await self.banners.use(banner_for(banner) or self.placeholder, update)
 
     @staticmethod
     def row_name(row):

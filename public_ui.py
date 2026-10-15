@@ -5,10 +5,12 @@ import secrets
 import time
 from datetime import datetime, timezone, timedelta
 from html import escape
+from contextvars import ContextVar
+from functools import wraps
 from telebot import types
 from telebot.asyncio_helper import ApiTelegramException
 from profile_monitor.style import TEXT_EMOJI_IDS
-from ui_banners import banner_for
+from ui_banners import banner_for, banner_cache
 from public_pages import public_url
 
 
@@ -18,6 +20,18 @@ class PublicUI:
         self.product, self.inbox, self.tools, self.profile = product, inbox, tools, profile
         self.mt_access = mt_access
         self.button_icons_enabled = True
+        self.banners = banner_cache(bot)
+        self.current_message = ContextVar('nyan_public_message', default=None)
+
+    def edit_current(self, handler):
+        @wraps(handler)
+        async def wrapped(call):
+            token = self.current_message.set(getattr(call, 'message', None))
+            try:
+                return await handler(call)
+            finally:
+                self.current_message.reset(token)
+        return wrapped
 
     def button(self, text, **kwargs):
         # Verified against https://t.me/addemoji/TgAndroidIcons (2026-10-15).
@@ -66,15 +80,54 @@ class PublicUI:
             text = '<b>' + escape(title) + '</b>\n' + escape(body)
             kwargs['parse_mode'] = 'HTML'
         image_path = banner_for(banner)
+        current = self.current_message.get()
+        editable = current is not None and getattr(current, 'message_id', None) is not None
+        # Auth checks happen before rendering; never edit a message outside this user's chat.
+        editable = editable and getattr(getattr(current, 'chat', None), 'id', None) == actor
+        async def edit(method, *args, **options):
+            try:
+                return True, await self._send_with_icons(method, *args, chat_id=actor,
+                    message_id=current.message_id, **options)
+            except ApiTelegramException as exc:
+                description = str(exc.description).lower()
+                if exc.error_code == 400 and 'message is not modified' in description:
+                    # Callback snapshots can be older than the current server-side photo.
+                    # Do not overwrite a banner's cached file ID with that stale snapshot.
+                    return True, None
+                if exc.error_code == 400 and any(term in description for term in (
+                        'message to edit not found', "message can't be edited", 'message can not be edited', 'message_id_invalid')):
+                    return False, None
+                raise
         if image_path:
-            with image_path.open('rb') as image:
+            async def render(image):
                 if len(text) <= 900:
+                    if editable and getattr(current, 'photo', None):
+                        photos = current.photo
+                        if isinstance(image, str) and image == photos[-1].file_id:
+                            done, result = await edit(self.bot.edit_message_caption, text, **kwargs)
+                        else:
+                            options = dict(kwargs)
+                            mode = options.pop('parse_mode', None)
+                            media = types.InputMediaPhoto(image, caption=text, parse_mode=mode)
+                            done, result = await edit(self.bot.edit_message_media, media, **options)
+                        if done:
+                            return result
+                        if hasattr(image, 'seek'):
+                            image.seek(0)
                     return await self._send_with_icons(self.bot.send_photo, actor, image, caption=text, **kwargs)
                 # Keep the complete privacy/help text; photo captions have a smaller limit.
-                await self.bot.send_photo(actor, image)
+                return await self.bot.send_photo(actor, image)
+            result = await self.banners.use(image_path, render)
+            if len(text) <= 900:
+                return result
+        elif editable and len(text) <= 900:
+            method = self.bot.edit_message_caption if getattr(current, 'photo', None) else self.bot.edit_message_text
+            done, result = await edit(method, text, **kwargs)
+            if done:
+                return result
         return await self._send_with_icons(self.bot.send_message, actor, text, **kwargs)
 
-    async def _send_with_icons(self, method, actor, *args, **kwargs):
+    async def _send_with_icons(self, method, *args, **kwargs):
         markup = kwargs.get('reply_markup')
         has_icons = markup is not None and any(getattr(b, 'icon_custom_emoji_id', None) for row in markup.keyboard for b in row)
         def plain_markup():
@@ -88,7 +141,7 @@ class PublicUI:
             kwargs['reply_markup'] = plain_markup()
             has_icons = False
         try:
-            return await method(actor, *args, **kwargs)
+            return await method(*args, **kwargs)
         except ApiTelegramException as exc:
             description = str(exc.description).lower()
             if not (has_icons and exc.error_code == 400 and any(term in description for term in ('custom_emoji', 'custom emoji', 'premium', 'button_icon', 'icon_custom'))):
@@ -98,7 +151,9 @@ class PublicUI:
             for value in args:
                 if hasattr(value, 'seek'):
                     value.seek(0)
-            return await method(actor, *args, **kwargs)
+                elif isinstance(value, types.InputMediaPhoto) and hasattr(value.media, 'seek'):
+                    value.media.seek(0)
+            return await method(*args, **kwargs)
 
     def keyboard(self, allowed=True):
         kb = types.InlineKeyboardMarkup()
@@ -176,6 +231,14 @@ class PublicUI:
             module = self.profile()
             if module.state != 'ready':
                 return await self.send(actor, 'Наблюдение за профилями сейчас недоступно. Уведомления о сообщениях и статистика продолжают работать.', banner='private_profiles', reply_markup=self.back(kb))
+            current = self.current_message.get()
+            if current is not None and getattr(current, 'message_id', None) is not None and getattr(current, 'photo', None) and current.chat.id == actor:
+                try:
+                    return await module.ui.render_main(actor, current.message_id)
+                except ApiTelegramException as exc:
+                    if exc.error_code != 400 or not any(term in str(exc.description).lower() for term in (
+                            'message to edit not found', "message can't be edited", 'message can not be edited', 'message_id_invalid')):
+                        raise
             return await module.ui.send_main(actor)
         if action == 'connect':
             text = ('Подключить аккаунт\n\n'
@@ -332,6 +395,7 @@ class PublicUI:
             return await self.page(msg.from_user.id, {'chatstats':'stats','mutelist':'rules'}.get(action,action))
 
         @self.bot.callback_query_handler(func=lambda call: bool(call.data and (call.data.startswith('ny:') or call.data in ('pm:nav:main','pm:nav:tools'))))
+        @self.edit_current
         async def callback(call):
             actor = call.from_user.id
             if not call.message or call.message.chat.type != 'private' or call.message.chat.id != actor:

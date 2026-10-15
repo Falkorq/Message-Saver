@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from telebot import types
 from telebot.async_telebot import AsyncTeleBot
 from telebot import asyncio_helper
-from reliable import AtomicConnection, DurableInbox, DeliveryBudget
+from reliable import AtomicConnection, DurableInbox, DeliveryBudget, ensure_outbox_indexes
 from product_state import ProductState
 from erasure_guard import ErasureGuard
 from telebot.asyncio_helper import ApiTelegramException
@@ -172,6 +172,7 @@ for column, definition in {
 }.items():
     if column not in outbox_columns:
         db.execute(f"ALTER TABLE outbox ADD COLUMN {column} {definition}")
+ensure_outbox_indexes(db)
 if db.execute("PRAGMA user_version").fetchone()[0] < 1:
     # Новое оформление заменяет сохранённые ранее значки заголовков один раз.
     db.execute("DELETE FROM style_emojis WHERE event IN ('delete', 'edit')")
@@ -210,6 +211,25 @@ def paced_send(method):
 for method_name in ('send_message','send_photo','send_voice','send_video','send_video_note',
                     'send_animation','send_sticker','send_document','send_audio','send_media_group'):
     setattr(bot, method_name, paced_send(getattr(bot, method_name)))
+
+
+def paced_edit(method, recipient_position=1):
+    async def edit(*args, **kwargs):
+        recipient = kwargs.get('chat_id', args[recipient_position] if len(args)>recipient_position else None)
+        if recipient is not None:
+            await delivery_budget.take(recipient)
+        try:
+            return await method(*args, **kwargs)
+        except ApiTelegramException as exc:
+            if recipient is not None and exc.error_code == 429:
+                delay = int((exc.result_json or {}).get('parameters',{}).get('retry_after',1))
+                delivery_budget.postpone(recipient, max(1,delay))
+            raise
+    return edit
+
+
+for method_name in ('edit_message_media','edit_message_caption','edit_message_text','edit_message_reply_markup'):
+    setattr(bot, method_name, paced_edit(getattr(bot, method_name), 0 if method_name=='edit_message_reply_markup' else 1))
 
 
 def notification_target(payload):

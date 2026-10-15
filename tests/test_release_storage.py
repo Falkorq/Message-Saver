@@ -33,7 +33,15 @@ class StorageReleaseTests(unittest.TestCase):
                 else:self.assertNotEqual(result.returncode,0)
                 self.assertNotIn(key,result.stdout+result.stderr)
                 return result
-            run('-c','import app; assert app.profile_monitor.state=="disabled"; app.db.close()')
+            run('-c','import app; assert app.profile_monitor.state=="disabled"; assert {r[1] for r in app.db.execute("PRAGMA index_list(outbox)")} >= {"outbox_recipient_fifo","outbox_ready","outbox_created_at"}; app.db.close()')
+            # Legacy databases may lack failed; indexes must be created after column migration.
+            import sqlite3
+            legacy=sqlite3.connect(root/'synthetic.sqlite3')
+            for index in ('outbox_recipient_fifo','outbox_ready','outbox_created_at'):
+                legacy.execute('DROP INDEX '+index)
+            legacy.execute('ALTER TABLE outbox DROP COLUMN failed')
+            legacy.commit();legacy.close()
+            run('-c','import app; assert {r[1] for r in app.db.execute("PRAGMA index_list(outbox)")} >= {"outbox_recipient_fifo","outbox_ready","outbox_created_at"}; app.db.close()')
             self.assertEqual((root/'.env').read_text(encoding='utf-8'),env_text)
             run('storage_admin.py','backup')
             backup=next((root/'backups').glob('*-regular-*.aes'))

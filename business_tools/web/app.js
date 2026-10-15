@@ -32,16 +32,30 @@ theme(savedTheme || 'light');
 $('theme').onclick=()=>{const value=document.documentElement.dataset.theme==='dark'?'light':'dark';theme(value);closeSheets();try{localStorage.setItem('stats-theme',value);}catch{}};
 if(tg){tg.ready();tg.expand();tg.BackButton.onClick(()=>{const open=document.querySelector('dialog[open]');if(open)open.close();else navigate('chats');});}
 function params(){return new URLSearchParams({period:state.period,account:$('account').value,q:state.screen==='chats'?state.search:'',sort:state.screen==='rankings'?(state.rank==='total_messages'?'messages':state.rank):state.sort,pins:state.screen==='chats'?pinned.slice(0,200).join(','):'',favorites:state.screen==='chats' && state.favoritesOnly?'1':'0'});}
+function requestDeadline(parent, milliseconds=12000){
+  // iOS 16 has AbortController, but not AbortSignal.any().
+  const controller=new AbortController();
+  let expired=false;
+  const cancel=()=>controller.abort();
+  if(parent?.aborted)cancel();
+  else parent?.addEventListener('abort',cancel,{once:true});
+  const timer=setTimeout(()=>{expired=true;controller.abort();},milliseconds);
+  return {signal:controller.signal,expired:()=>expired,clear(){clearTimeout(timer);parent?.removeEventListener('abort',cancel);}};
+}
 async function api(path,query,signal){
+  const deadline=requestDeadline(signal);
+  const timeout=()=>Error('Ответ задерживается. Последние загруженные данные сохранены; попробуйте ещё раз.');
+  try{
   let response;
-  try{response=await fetch(`${path}?${query}`,{headers:{Authorization:`tma ${tg?.initData || ''}`,Accept:'application/json'},cache:'no-store',signal:AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(12000)])});}
-  catch(error){if(error.name==='AbortError')throw error;if(error.name==='TimeoutError')throw Error('Ответ задерживается. Последние загруженные данные сохранены; попробуйте ещё раз.');throw Error('Не удалось подключиться. Проверьте интернет и попробуйте ещё раз.');}
+  try{response=await fetch(`${path}?${query}`,{headers:{Authorization:`tma ${tg?.initData || ''}`,Accept:'application/json'},cache:'no-store',signal:deadline.signal});}
+  catch(error){if(deadline.expired())throw timeout();if(error.name==='AbortError')throw error;throw Error('Не удалось подключиться. Проверьте интернет и попробуйте ещё раз.');}
   const ray=response.headers.get('cf-ray');
   const reference=ray && /^[a-zA-Z0-9-]{1,80}$/.test(ray)?` Код проверки: ${ray}.`:'';
   if(response.headers.get('cf-mitigated')==='challenge')throw Error(`Статистика временно недоступна. Повторите позже или обратитесь в поддержку.${reference}`);
   let data;
   try{data=await response.json();}
   catch(error){
+    if(deadline.expired())throw timeout();
     if(error.name==='AbortError')throw error;
     if(response.status===403 && ray)throw Error(`Сервис временно отклонил запрос. Повторите позже.${reference}`);
     if(response.status>=500)throw Error(`Ошибка сервера (${response.status}). Попробуйте позже.${reference}`);
@@ -50,6 +64,7 @@ async function api(path,query,signal){
   if(!response.ok)throw Object.assign(Error(typeof data?.error==='string'?data.error:`Не удалось загрузить статистику (HTTP ${response.status}).`),{code:data.code,status:response.status});
   if(!data || typeof data!=='object' || Array.isArray(data))throw Error('Получен некорректный формат статистики.');
   return data;
+  }finally{deadline.clear();}
 }
 const screenScroll=new Map();
 function navigate(screen,selected=null,section='overview'){screenScroll.set(location.hash||'#chats',window.scrollY);const target=selected?`chat/${selected.account_id}/${selected.chat_id}/${section}`:screen;if(location.hash.slice(1)===target){route();}else location.hash=target;}

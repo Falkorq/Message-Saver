@@ -44,3 +44,8 @@ and not (http.host eq "stats.nyaaa.moe" and starts_with(http.request.uri.path, "
 Архив не содержит `.env`, базу, Telegram-сессии и сертификаты. Исправление показывает отдельно проверку Cloudflare, блокировку 403, серверные ошибки и некорректный JSON; оно не меняет настройки Cloudflare автоматически. Заголовок вкладки теперь обновляется даже при ошибке загрузки.
 
 Документация: [определение Challenge по cf-mitigated](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/), [Bot Fight Mode и его ограничения](https://developers.cloudflare.com/bots/get-started/bot-fight-mode/), [Skip rules](https://developers.cloudflare.com/waf/custom-rules/skip/).
+# iPhone на iOS 16: интерфейс открывается, но запросов статистики нет
+
+Если Android работает, а iPhone показывает «Не удалось подключиться» без запросов `/api/overview` в журнале сервера, проверьте версию фронтенда. Ранее Mini App вызывал `AbortSignal.any()`, которого нет в iOS 16: WebKit добавил его в Safari 17.4 ([источник](https://webkit.org/blog/15063/webkit-features-in-safari-17-4/)). Исключение возникало до `fetch()` и ошибочно отображалось как проблема с интернетом.
+
+Текущая версия использует совместимый `AbortController` и таймер, без `AbortSignal.any()` и `AbortSignal.timeout()`. Обновите `app.js` и `index.html`, закройте Mini App и откройте его заново из бота. URL скрипта содержит версию, чтобы старый кэш не сохранил несовместимый код. Если после этого сервер возвращает 401/403, проверяйте авторизацию и приглашение: это отдельная причина.

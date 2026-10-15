@@ -42,6 +42,13 @@ class AtomicConnection(sqlite3.Connection):
             self._atomic = False
 
 
+def ensure_outbox_indexes(db):
+    """Run after legacy columns are added; preserve FIFO for each recipient."""
+    db.execute('CREATE INDEX IF NOT EXISTS outbox_recipient_fifo ON outbox(recipient_id,failed,id)')
+    db.execute('CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(failed,retry_at,id)')
+    db.execute('CREATE INDEX IF NOT EXISTS outbox_created_at ON outbox(created_at)')
+
+
 class InboxFull(RuntimeError):
     pass
 

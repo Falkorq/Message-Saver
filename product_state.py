@@ -109,10 +109,12 @@ class ProductState:
             self.db.execute('DELETE FROM settings WHERE recipient_id=?', (owner,))
             self.db.execute('DELETE FROM notification_preferences WHERE owner_id=?', (owner,))
             self.db.execute('UPDATE account_state SET erased_through=MAX(erased_through,?) WHERE owner_id=?',(stamp,owner))
+            account_set = set(accounts)
+            connection_set = {row[0] for account in accounts for row in self.db.execute(
+                'SELECT connection_id FROM connections WHERE account_id=?', (account,))}
             for row in self.db.execute('SELECT * FROM incoming_updates WHERE payload IS NOT NULL').fetchall():
                 payload = inbox.payload(row)
-                if payload.get('account_id') in accounts or payload.get('connection_id') in {
-                    c[0] for a in accounts for c in self.db.execute('SELECT connection_id FROM connections WHERE account_id=?',(a,))}:
+                if payload.get('account_id') in account_set or payload.get('connection_id') in connection_set:
                     self.db.execute('DELETE FROM incoming_updates WHERE update_id=?', (row['update_id'],))
 
 
