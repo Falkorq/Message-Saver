@@ -96,7 +96,8 @@ class PublicMenuIconTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_section_assets_exist_and_unknown_paths_are_rejected(self):
         for section in ('menu', 'invite', 'connect', 'status', 'notifications', 'data', 'help', 'erase', 'rules', 'private_profiles', 'profiles', 'watch', 'events', 'settings'):
-            self.assertTrue(banner_for(section).read_bytes().startswith(b'\x89PNG\r\n\x1a\n'))
+            signature = b'\xff\xd8\xff' if section == 'connect' else b'\x89PNG\r\n\x1a\n'
+            self.assertTrue(banner_for(section).read_bytes().startswith(signature))
         self.assertIsNone(banner_for('../.env'))
 
 

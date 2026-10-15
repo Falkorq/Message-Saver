@@ -18,6 +18,7 @@ from .service import STAT_VIEWS
 from .web_metrics import enrich_overview, enrich_detail, web_chats, period_totals
 from .avatars import AvatarCache
 from public_pages import render_public_page
+from ui_banners import banner_for
 from .export_web import register_import
 from .chat_export import MAX_BYTES
 from .combined_chats import combine_chat_rows, combined_detail, chat_pin_keys
@@ -267,7 +268,12 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
         if page:
             return web.Response(text=render_public_page(page), content_type='text/html')
         filename = 'privacy.html' if request.path=='/privacy' else request.match_info.get('file', 'index.html')
-        if filename not in ('privacy.html','index.html', 'app.js', 'import.js', 'material.js', 'style.css', 'public.css', 'nyan-icon.jpg', 'connect-ios.jpg', 'icons.svg',
+        if filename in ('connect.jpg','connect-ios.jpg'):
+            image = banner_for('connect')
+            if image is None:
+                raise web.HTTPNotFound()
+            return web.FileResponse(image)
+        if filename not in ('privacy.html','index.html', 'app.js', 'import.js', 'material.js', 'style.css', 'public.css', 'nyan-icon.jpg', 'icons.svg',
                             'nunito-400.ttf', 'nunito-600.ttf', 'nunito-700.ttf'):
             raise web.HTTPNotFound()
         return web.FileResponse(assets / filename)
