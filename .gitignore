@@ -15,3 +15,5 @@ ssl/
 *.session
 *.session-journal
 erasure-guard.tmp
+offsite-backup-state.json
+offsite-backup-state.tmp

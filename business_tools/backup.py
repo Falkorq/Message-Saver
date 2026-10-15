@@ -6,13 +6,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-def backup_database(db, tag="statistics-v2", cipher=None):
+def backup_database(db, tag="statistics-v2", cipher=None, directory=None):
     path = next((row[2] for row in db.execute("PRAGMA database_list") if row[1] == "main"), "")
     if not path:
         return None
     db.commit()
     source = Path(path)
-    directory = source.parent / "backups"
+    directory = Path(directory) if directory is not None else source.parent / "backups"
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     target = directory / f"{source.stem}-{tag}-{stamp}.sqlite3"

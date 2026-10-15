@@ -1044,6 +1044,8 @@ async def maintain_storage():
 
 
 async def main():
+    from offsite_backup import backup_loop
+    offsite = asyncio.create_task(backup_loop(bot, db_path, message_cipher, os.getenv('BACKUP_CHAT_ID')))
     worker = asyncio.create_task(supervise_outbox())
     recovery = asyncio.create_task(business_tools.recover_history())
     maintenance = asyncio.create_task(maintain_storage())
@@ -1081,7 +1083,8 @@ async def main():
         worker.cancel()
         recovery.cancel()
         maintenance.cancel()
-        await asyncio.gather(worker, recovery, maintenance, return_exceptions=True)
+        offsite.cancel()
+        await asyncio.gather(worker, recovery, maintenance, offsite, return_exceptions=True)
         await bot.close_session()
         db.close()
 

@@ -28,6 +28,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         db=Mock()
         context={'asyncio':asyncio,'os':SimpleNamespace(getenv=lambda _:None),
             'bot':bot,'types':types,'profile_monitor':profile,'db':db,
+            'db_path':Path('synthetic.sqlite3'),'message_cipher':None,
             'business_tools':SimpleNamespace(recover_history=background),
             'supervise_outbox':background,'maintain_storage':background,'durable_polling':bot.infinity_polling,'log':logging.getLogger('startup-test')}
         exec(compile(ast.Module(body=[main],type_ignores=[]),str(source),'exec'),context)
