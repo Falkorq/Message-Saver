@@ -8,7 +8,7 @@ from profile_monitor.style import icon
 
 TITLE_ICONS = {
     'Nyan message': 'bot', 'Добро пожаловать в Nyan': 'bot',
-    'Подключить аккаунт': 'account', 'Состояние бота': 'success',
+    'Подключить аккаунт': 'account', 'Подключение на iPhone': 'account', 'Состояние бота': 'success',
     'Уведомления о сообщениях': 'notifications', 'Мои данные': 'saved',
     'Данные и приватность': 'info', 'Помощь': 'question',
     'Статистика чатов': 'chat_stats', 'Старые правила автоудаления': 'history',

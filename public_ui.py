@@ -40,6 +40,7 @@ class PublicUI:
         action = kwargs.get('callback_data', '').removeprefix('ny:')
         icons = {
             'connect': '5877465816030515018',
+            'connect_guide': TEXT_EMOJI_IDS['info'][0],
             'status': TEXT_EMOJI_IDS['success'][0],
             'notifications': TEXT_EMOJI_IDS['notifications'][0],
             'help': TEXT_EMOJI_IDS['question'][0],
@@ -274,7 +275,20 @@ class PublicUI:
                     'Для проверки уведомлений попросите собеседника отправить сообщение в выбранном чате, изменить и удалить его. '
                     'О своих сообщениях бот по умолчанию не уведомляет. Разрешать удаление сообщений самому боту не нужно.')
             kb.row(self.button('Проверить подключение', callback_data='ny:status'))
+            kb.row(self.button('Инструкция для iPhone в картинках', callback_data='ny:connect_guide'))
             self.link(kb, 'Инструкция с пояснениями', 'help#connect')
+        elif action == 'connect_guide':
+            username = os.getenv('BOT_USERNAME','').strip().lstrip('@')
+            target = '@'+username if username else 'username этого бота'
+            text = ('Подключение на iPhone\n\n'
+                    '1. Откройте Настройки в Telegram.\n'
+                    '2. Нажмите Изменить (Edit) вверху профиля.\n'
+                    '3. Откройте Автоматизация чатов (Chat Automation).\n'
+                    f'4. В поле Bot Username or Link укажите {target} и выберите нужные чаты.\n\n'
+                    'Названия и расположение пунктов могут отличаться в вашей версии Telegram. '
+                    'После подключения вернитесь сюда и проверьте состояние бота.')
+            kb.row(self.button('Проверить подключение', callback_data='ny:status'))
+            kb.row(self.button('К инструкции подключения', callback_data='ny:connect'))
         elif action == 'status':
             states = self.product.states(owner)
             names = {'not_connected':'Не подключён. Добавьте Nyan в настройках Telegram.',

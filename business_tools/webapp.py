@@ -267,7 +267,7 @@ def create_app(token, repository, service, routes, avatars=None, product=None, i
         if page:
             return web.Response(text=render_public_page(page), content_type='text/html')
         filename = 'privacy.html' if request.path=='/privacy' else request.match_info.get('file', 'index.html')
-        if filename not in ('privacy.html','index.html', 'app.js', 'import.js', 'material.js', 'style.css', 'public.css', 'nyan-icon.jpg', 'icons.svg',
+        if filename not in ('privacy.html','index.html', 'app.js', 'import.js', 'material.js', 'style.css', 'public.css', 'nyan-icon.jpg', 'connect-ios.jpg', 'icons.svg',
                             'nunito-400.ttf', 'nunito-600.ttf', 'nunito-700.ttf'):
             raise web.HTTPNotFound()
         return web.FileResponse(assets / filename)

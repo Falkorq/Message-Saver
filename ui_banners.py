@@ -6,6 +6,9 @@ BANNER_DIR = Path(__file__).resolve().parent / 'assets' / 'banners'
 
 
 def banner_for(section):
+    if section == 'connect_guide':
+        path = BANNER_DIR.parent.parent / 'business_tools' / 'web' / 'connect-ios.jpg'
+        return path if path.is_file() else None
     names = {'menu', 'invite', 'connect', 'status', 'notifications', 'data', 'help',
              'erase', 'rules', 'private_profiles', 'profiles', 'watch', 'events', 'settings'}
     if section not in names:
