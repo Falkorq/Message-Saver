@@ -3,11 +3,11 @@
 Periods select the sending date (also for edits/deletions); responses and starts
 select the date of the responding/starting message. All intervals are half-open.
 """
-import hashlib
 import json
 import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from message_crypto import text_metrics, content_fingerprint
 
 MOSCOW = timezone(timedelta(hours=3), "Europe/Moscow")
 PERIODS = {"today": "Сегодня", "7": "7 дней", "30": "30 дней", "all": "Всё время"}
@@ -41,6 +41,20 @@ def histogram_summary(metrics, prefix):
         cumulative += n
     return {"count": count, "mean": sum(v * n for v, n in buckets) / count,
             "median": sum(values) / 2}
+
+
+def observation_windows(db, accounts, progress, now):
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='observation_intervals'").fetchone():
+        windows={a:[] for a in accounts}
+        if accounts:
+            for row in db.execute('SELECT account_id,start_at,end_at FROM observation_intervals WHERE account_id IN ('+','.join('?' for _ in accounts)+')',accounts):
+                windows[row[0]].append((row[1],row[2] if row[2] is not None else now))
+        return windows
+    return {a:[(max(progress.get('coverage_start',now),progress.get(f'continuous_{a}',now)),now)] for a in accounts}
+
+
+def day_is_known(windows, stamp, now):
+    return bool(windows) and all(any(start<=stamp and end>=min(stamp+86400,now) for start,end in intervals) for intervals in windows.values())
 
 
 class AnalyticsRepository:
@@ -180,19 +194,20 @@ class AnalyticsRepository:
     @staticmethod
     def fingerprint(record):
         # A digest suffices for event deduplication; never store or log message text here.
-        fields = {k: record.get(k) for k in ("text", "caption", "type", "file_unique_id", "details", "metadata")}
-        return hashlib.sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        return record['_stats_metrics']['fingerprint'] if '_stats_metrics' in record else content_fingerprint(record)
+
+    def stats_source(self, record):
+        cipher = getattr(self, 'message_cipher', None)
+        return cipher.stats_record(record) if cipher else record
 
     def record_details(self, connection_id, account_id, message_id, record):
         from .repository import STOP_WORDS
-        import re
         key = (connection_id, record["chat_id"], message_id)
         row = self.db.execute("SELECT * FROM business_stats_seen WHERE connection_id=? AND chat_id=? AND message_id=?", key).fetchone()
         if not row or row["detailed"]:
             return False
-        text = record.get("text") or record.get("caption") or ""
-        if not isinstance(text, str):
-            raise ValueError("Invalid message text type")
+        record = self.stats_source(record)
+        chars, words = text_metrics(record)
         # Missing original timestamps cannot be used for time-based statistics.
         if not record.get("sent_at") or record.get("sender_id") is None:
             return False
@@ -206,18 +221,20 @@ class AnalyticsRepository:
         self._link(before, after, -1)
         self.db.execute("UPDATE business_stats_seen SET account_id=?,sent_at=?,side=?,chars=?,kind=?,duration=?,"
                         "fingerprint=?,detailed=1 WHERE connection_id=? AND chat_id=? AND message_id=?",
-                        (account_id, stamp, side, len(text), kind, duration, self.fingerprint(record), *key))
+                        (account_id, stamp, side, chars, kind, duration, self.fingerprint(record), *key))
         current = dict(account_id=account_id, chat_id=record["chat_id"], sent_at=stamp, side=side)
         self._link(before, current)
         self._link(current, after)
         dt = datetime.fromtimestamp(stamp, MOSCOW)
-        values = {f"{side}_n": 1, f"{side}_chars": len(text), f"{side}_max": len(text), f"h_{dt.hour}": 1}
+        values = {f"{side}_n": 1, f"{side}_chars": chars, f"{side}_max": chars, f"h_{dt.hour}": 1}
         if kind != "text":
             values[f"{side}_media_{kind}"] = 1
         if kind in ("voice", "video_note"):
             values[f"{side}_{kind}_{'missing' if duration is None else 'seconds'}"] = 1 if duration is None else duration
         self._daily_add(account_id, record["chat_id"], day_of(stamp), values)
-        for word, count in Counter(w for w in re.findall(r"[а-яёa-z]{3,}", text.lower()) if w not in STOP_WORDS).items():
+        for word, count in words.items():
+            if word in STOP_WORDS:
+                continue
             self.db.execute("INSERT INTO business_stats_side_words VALUES(?,?,?,?,?,?) "
                             "ON CONFLICT(account_id,chat_id,day,side,word) DO UPDATE SET count=count+excluded.count",
                             (account_id, record["chat_id"], day_of(stamp), side, word, count))
@@ -232,6 +249,8 @@ class AnalyticsRepository:
 
     def record_event(self, owner_id, account_id, connection_id, chat_id, message_id,
                      event, record=None, detected_at=None):
+        if record:
+            record = self.stats_source(record)
         self.check_account(owner_id, account_id)
         self.check_chat_owner(owner_id,account_id,chat_id)
         if event=='delete' and record:
@@ -291,7 +310,7 @@ class AnalyticsRepository:
                                "ON s.account_id=d.account_id AND s.chat_id=d.chat_id WHERE " + " AND ".join(where) +
                                " ORDER BY d.day", args).fetchall()
 
-    def analytics(self, owner_id, account_id, chat_id, period="all", now=None, side="both", page=0):
+    def analytics(self, owner_id, account_id, chat_id, period="all", now=None, side="both", page=0, word_limit=5):
         self.check_account(owner_id, account_id)
         legacy = self.stat(owner_id, account_id, chat_id)
         if not legacy:
@@ -321,23 +340,23 @@ class AnalyticsRepository:
         if side in ("o", "p"):
             clauses.append("side=?"); word_args.append(side)
         words = self.db.execute("SELECT word,SUM(count) AS count FROM business_stats_side_words WHERE " +
-                                " AND ".join(clauses) + " GROUP BY word ORDER BY count DESC,word LIMIT 5 OFFSET ?",
-                                (*word_args, max(0, page)*5)).fetchall()
+                                " AND ".join(clauses) + " GROUP BY word ORDER BY count DESC,word LIMIT ? OFFSET ?",
+                                (*word_args, word_limit, max(0, page)*word_limit)).fetchall()
         word_count = self.db.execute("SELECT COUNT(DISTINCT word) FROM business_stats_side_words WHERE " +
                                      " AND ".join(clauses), word_args).fetchone()[0]
         if period == "all" and side == "both":
             words = self.db.execute("SELECT word,count FROM business_stats_words WHERE account_id=? AND chat_id=? "
-                                    "ORDER BY count DESC,word LIMIT 5 OFFSET ?", (account_id, chat_id, max(0,page)*5)).fetchall()
+                                    "ORDER BY count DESC,word LIMIT ? OFFSET ?", (account_id, chat_id, word_limit, max(0,page)*word_limit)).fetchall()
             word_count = self.db.execute("SELECT COUNT(*) FROM business_stats_words WHERE account_id=? AND chat_id=?", (account_id,chat_id)).fetchone()[0]
         progress = dict(self.db.execute("SELECT name,value FROM business_stats_progress"))
         available = self.db.execute("SELECT MIN(sent_at) FROM business_stats_seen WHERE account_id=? AND chat_id=? AND detailed=1", (account_id,chat_id)).fetchone()[0]
         activity_days = [(d,n) for d,n in sorted(days.items()) if n]
         if start is not None:
             activity_days=[]
-            continuous=max(progress['coverage_start'],progress.get(f'continuous_{account_id}',progress['coverage_start']))
+            windows=observation_windows(self.db,[account_id],progress,int(time.time()) if now is None else now)
             for stamp in range(start,end,86400):
                 day=day_of(stamp)
-                activity_days.append((day,days[day] if days[day] or stamp>=continuous else None))
+                activity_days.append((day,days[day] if days[day] or day_is_known(windows,stamp,int(time.time()) if now is None else now) else None))
         return dict(legacy=legacy, metrics=metrics, days=days, lengths=lengths, last=last,
                     unknown=unknown, words=words, word_count=word_count, progress=progress, available=available,
                     period=period, start=start, end=end, activity_days=activity_days)
@@ -346,14 +365,13 @@ class AnalyticsRepository:
         accounts = self.check_account(owner_id, account_id)
         if not accounts:
             return []
-        rows = [dict(r) for r in self.db.execute("SELECT * FROM business_chat_stats WHERE owner_id=? AND account_id IN (" +
-                                                ",".join("?" for _ in accounts) + ")", (owner_id,*accounts))]
+        rows = [dict(r) for r in self.db.execute("SELECT s.*,m.metrics AS cached_metrics FROM business_chat_stats s "
+            "LEFT JOIN business_stats_chat_metrics m ON m.account_id=s.account_id AND m.chat_id=s.chat_id "
+            "WHERE s.owner_id=? AND s.account_id IN (" + ",".join("?" for _ in accounts) + ")", (owner_id,*accounts))]
         metrics = {}
         if period=='all':
             for r in rows:
-                cached = self.db.execute('SELECT metrics FROM business_stats_chat_metrics WHERE account_id=? AND chat_id=?',
-                                         (r['account_id'],r['chat_id'])).fetchone()
-                metrics[(r['account_id'],r['chat_id'])] = Counter(json.loads(cached[0]) if cached else {})
+                metrics[(r['account_id'],r['chat_id'])] = Counter(json.loads(r.pop('cached_metrics') or '{}'))
         else:
             for daily in self.daily_rows(owner_id, account_id, period=period, now=now):
                 metrics.setdefault((daily["account_id"],daily["chat_id"]), Counter()).update(json.loads(daily["metrics"]))

@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import unittest
 from types import SimpleNamespace
@@ -54,6 +55,7 @@ class FakeTelegram:
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
+        self.addCleanup(self.db.close)
         self.db.row_factory = sqlite3.Row
         self.repo = ProfileRepository(self.db)
         self.repo.migrate()
@@ -162,6 +164,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_migrates_existing_watchlist_without_access_hash(self):
         db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
         db.row_factory = sqlite3.Row
         db.execute(
             "CREATE TABLE profile_watchers(owner_id INTEGER,user_id INTEGER,username TEXT,"
@@ -181,7 +184,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await service.check(1, 10)
         self.assertEqual(self.repo.get(1, 10)["username"], "old")
-        self.assertIn("unavailable", self.repo.get(1, 10)["last_error"])
+        self.assertEqual("RuntimeError", self.repo.get(1, 10)["last_error"])
 
     async def test_scheduler_continues_after_one_user_error(self):
         self.repo.add(1, snapshot(user_id=10))
@@ -193,7 +196,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         scheduler = ProfileScheduler(self.repo, service)
         await scheduler.run_cycle(pause_between=False)
-        self.assertIn("bad user", self.repo.get(1, 10)["last_error"])
+        self.assertEqual("RuntimeError", self.repo.get(1, 10)["last_error"])
         self.assertEqual(self.repo.get(1, 11)["username"], "updated")
 
 
@@ -209,6 +212,7 @@ class TelegramClientTests(unittest.IsolatedAsyncioTestCase):
                 return SimpleNamespace(users=[user], full_user=SimpleNamespace(about=None))
 
         wrapper = ProfileTelegramClient.__new__(ProfileTelegramClient)
+        wrapper.avatar_lock = asyncio.Lock()
         wrapper.client = FakeClient()
         profile, _ = await wrapper.fetch(10, access_hash=123456789)
         self.assertEqual(profile.username, "test_profile")
@@ -230,6 +234,7 @@ class TelegramClientTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         wrapper = ProfileTelegramClient.__new__(ProfileTelegramClient)
+        wrapper.avatar_lock = asyncio.Lock()
         wrapper.client = FakeClient()
         profile, entity = await wrapper.fetch("test_profile")
         self.assertEqual(profile.username, "test_profile")
@@ -249,6 +254,7 @@ class TelegramClientTests(unittest.IsolatedAsyncioTestCase):
                 return SimpleNamespace(users=[user], full_user=SimpleNamespace(about="bio"))
 
         wrapper = ProfileTelegramClient.__new__(ProfileTelegramClient)
+        wrapper.avatar_lock = asyncio.Lock()
         wrapper.client = FakeClient()
         profile, entity = await wrapper.fetch(10, access_hash=123456789, username="old")
         self.assertEqual(profile.username, "new")

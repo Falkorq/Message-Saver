@@ -3,6 +3,7 @@ import logging
 import json
 import time
 import re
+import os
 from html import unescape
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -341,14 +342,14 @@ class BusinessToolsUI:
         rows = self.repo.active_mutes(self.owner(chat_id))
         total = len(rows); page = max(0, min(page, max(0, (total - 1) // PAGE_SIZE)))
         shown = rows[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
-        lines = [f"{icon('disabled')} <b>Муты</b>", ""]
+        lines = [f"{icon('disabled')} <b>Автоудаление (приостановлено)</b>", ""]
         buttons = []
         for row in shown:
             name = self.service.chat_name(row)
             lines.append(f"{escape(name)} — {format_until(row['until_at'])}")
             if row["last_error"]:
                 lines.append(f"{icon('warning')} Ошибка удаления: {escape(row['last_error'])}")
-            buttons.append([button("Снять мут · " + name[:24],
+            buttons.append([button("Отключить автоудаление · " + name[:24],
                                    f"bt:unmute:{row['account_id']}:{row['chat_id']}:{page}")])
         if not shown:
             lines.append(f"{icon('disabled')} Список мутов пуст")
@@ -356,7 +357,7 @@ class BusinessToolsUI:
         if page: nav.append(button("◀", f"bt:mutes:{page-1}"))
         if (page + 1) * PAGE_SIZE < total: nav.append(button("▶", f"bt:mutes:{page+1}"))
         if nav: buttons.append(nav)
-        buttons.append([button("◀ Назад", "pm:nav:tools")])
+        buttons.append([button("◀ Назад", "ny:menu")])
         await self.edit(chat_id, message_id, "\n".join(lines), keyboard(*buttons))
 
     async def render_stats(self, chat_id, message_id, page, sort="recent", state=None):
@@ -368,6 +369,10 @@ class BusinessToolsUI:
         self.save_state(chat_id,message_id,state)
         buttons = [[button('Аккаунт','bt:screen:accounts:0'),
                     button(PERIODS[state['period']],'bt:screen:period:0')]]
+        if os.getenv('WEBAPP_URL'):
+            from .webapp import validate_url
+            buttons.insert(0, [types.InlineKeyboardButton('Открыть статистику',
+                           web_app=types.WebAppInfo(validate_url(os.environ['WEBAPP_URL'])))])
         buttons += [[button('Сводка','bt:screen:summary:0'),button('Чаты','bt:screen:chats:0')],
                     [button('Моя статистика','bt:screen:mine:0'),button('Рейтинги','bt:screen:rankings:0')]]
         if state['screen'] in ('chats','rankings'):
@@ -456,8 +461,8 @@ class BusinessToolsUI:
         lines = [f"{escape(self.service.chat_name(row))} — {format_until(row['until_at'])}"
                  for row in rows[:MUTELIST_LIMIT]]
         if hidden > 0:
-            lines.append(f"… и ещё {hidden} (полный список — «Муты» в /menu)")
-        return f"{icon('disabled')} <b>Муты</b>\n\n" + "\n".join(lines)
+            lines.append(f"… и ещё {hidden} (полный список — «Автоудаление (приостановлено)» в /menu)")
+        return f"{icon('disabled')} <b>Автоудаление (приостановлено)</b>\n\n" + "\n".join(lines)
 
     async def edit(self, chat_id, message_id, text, markup):
         with open(self.placeholder, "rb") as image:

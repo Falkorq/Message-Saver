@@ -61,6 +61,7 @@ class CommandUITests(unittest.IsolatedAsyncioTestCase):
 
         reply_bot = ReplyBot()
         db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
         db.row_factory = sqlite3.Row
         repo = BusinessToolsRepository(db, {100: 1})
         repo.migrate()
@@ -77,6 +78,7 @@ class CommandUITests(unittest.IsolatedAsyncioTestCase):
 class RepositoryTests(unittest.TestCase):
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
+        self.addCleanup(self.db.close)
         self.db.row_factory = sqlite3.Row
         self.repo = BusinessToolsRepository(self.db, {100: 1})
         self.repo.migrate()
@@ -129,7 +131,7 @@ class RepositoryTests(unittest.TestCase):
 
     def test_expired_mute_is_removed(self):
         row = {"account_id": 100, "chat_id": 200, "display_name": "Tester", "username": "tester"}
-        self.repo.mute(1, row, int(time.time()) - 1)
+        self.repo._legacy_mute(1, row, int(time.time()) - 1)
         self.assertIsNone(self.repo.is_muted(100, 200))
         self.assertEqual(self.repo.active_mutes(1), [])
 
@@ -163,6 +165,7 @@ class RepositoryTests(unittest.TestCase):
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
+        self.addCleanup(self.db.close)
         self.db.row_factory = sqlite3.Row
         self.repo = BusinessToolsRepository(self.db, {100: 1})
         self.repo.migrate()
@@ -192,7 +195,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_muted_incoming_is_deleted_and_suppressed(self):
         row = {"account_id": 100, "chat_id": 200, "display_name": "Tester", "username": "tester"}
-        self.repo.mute(1, row, 0)
+        self.repo._legacy_mute(1, row, 0)
         result = await self.service.handle_business_message(
             self.message(5), record(message_id=5), 100, 1
         )
@@ -207,7 +210,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.message(6), command_record, 100, 1
         )
         self.assertEqual(result, "command")
-        self.assertIsNotNone(self.repo.is_muted(100, 200))
+        self.assertIsNone(self.repo.is_muted(100, 200))
         self.assertIsNone(self.repo.stat(1, 100, 200))
         self.assertEqual(len(self.notifications), 1)
 
@@ -218,7 +221,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.message(9), command_record, 100, 1
         )
         self.assertEqual(result, "command")
-        self.assertIsNotNone(self.repo.is_muted(100, 200))
+        self.assertIsNone(self.repo.is_muted(100, 200))
         self.assertIsNone(self.repo.stat(1, 100, 200))
         self.assertEqual(len(self.notifications), 1)
         self.assertIn("не разрешил удалить", self.notifications[0][1])
@@ -227,10 +230,10 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_error_is_recorded_and_reported_once(self):
         self.bot.fail = True
         row = {"account_id": 100, "chat_id": 200, "display_name": "Tester", "username": "tester"}
-        self.repo.mute(1, row, 0)
+        self.repo._legacy_mute(1, row, 0)
         with self.assertRaises(RuntimeError):
             await self.service.handle_business_message(self.message(7), record(message_id=7), 100, 1)
-        self.assertIn("no permission", self.repo.is_muted(100, 200)["last_error"])
+        self.assertEqual("RuntimeError", self.repo.is_muted(100, 200)["last_error"])
         self.assertEqual(len(self.notifications), 1)
         with self.assertRaises(RuntimeError):
             await self.service.handle_business_message(self.message(8), record(message_id=8), 100, 1)

@@ -11,7 +11,7 @@
 ## Главное меню
 
 ```text
-🤖 Personal Bot
+🤖 Nyan message
 ```
 
 Кнопки:

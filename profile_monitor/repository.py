@@ -162,7 +162,7 @@ class ProfileRepository:
     def set_error(self, owner_id, user_id, error):
         self.db.execute(
             "UPDATE profile_watchers SET last_checked_at=?,last_error=? WHERE owner_id=? AND user_id=?",
-            (int(time.time()), str(error)[:300], owner_id, user_id),
+            (int(time.time()), type(error).__name__, owner_id, user_id),
         )
         self.db.commit()
 

@@ -1,0 +1,46 @@
+# Статистика не загружается в Telegram
+
+Проверка 14 октября 2026: в предоставленном логе API отвечал 200, но публичный адрес при отдельных запросах вернул Cloudflare 403 и HTML «Just a moment…». Это подтверждает наличие блокировки Cloudflare, но не устанавливает причину конкретного запроса со скриншота. Уведомление об обновлении pip к ошибке отношения не имеет.
+
+## Сначала определить проверку
+
+1. Открой Cloudflare → домен **nyaaa.moe** → **Security → Analytics → Events** (в некоторых версиях панели: **Security → Events**).
+2. Отфильтруй **Hostname = stats.nyaaa.moe**, время — последние 30 минут.
+3. Открой Mini App, нажми «Повторить», обнови Events. Найди запрос `/api/overview` или `/api/chats/...` с действием Block / Managed Challenge / JS Challenge.
+4. Открой событие и посмотри **Service** и **Rule**. Новый интерфейс показывает код Cloudflare Ray: по нему проще найти точное событие.
+
+## Если Service — Bot Fight Mode
+
+**Security → Settings → Bot traffic → Bot Fight Mode → Off.** Это настройка всей зоны nyaaa.moe, включая основной сайт. У обычного бесплатного Bot Fight Mode нет исключения для отдельного поддомена; не создавай для него бесполезное правило Skip. Если защита нужна основному сайту, замени её адресными Custom Rules либо используй продукт с поддержкой исключений.
+
+## Если блокирует Custom Rule
+
+Открой **Security → Security rules → Custom rules**, найди именно правило из события и исключи запросы API статистики из его условия. Например, к существующему условию добавь:
+
+```
+and not (http.host eq "stats.nyaaa.moe" and starts_with(http.request.uri.path, "/api/"))
+```
+
+Существующее условие предварительно оберни в скобки. Если правило блокирует и стартовую страницу, а не только API, исключение нужно для всего `stats.nyaaa.moe`. Основной сайт этим исключением не затрагивается.
+
+## Если Service — Managed Rules / Super Bot Fight Mode
+
+Создай **Custom rule**, имя `Nyan API`, выражение:
+
+```
+(http.host eq "stats.nyaaa.moe" and starts_with(http.request.uri.path, "/api/"))
+```
+
+Выбери действие **Skip**, отметь только компонент, указанный в событии: **Managed rules** или **Super Bot Fight Mode**. Размести правило перед правилами, которые вызывают проверку, и нажми **Deploy**. Не отключай все правила и ограничения частоты запросов ради одной блокировки.
+
+После изменения полностью закрой Mini App и открой из бота заново. Проверка считается успешной, когда статистика открылась внутри Telegram. Без авторизации нормальный ответ `/api/overview` — JSON с кодом 401, а не HTML-проверка.
+
+## Обновление приложения
+
+1. В панели хостинга останови бота.
+2. Загрузи ZIP с исправлением, распакуй в корень проекта с заменой файлов.
+3. Запусти бота и заново открой Mini App.
+
+Архив не содержит `.env`, базу, Telegram-сессии и сертификаты. Исправление показывает отдельно проверку Cloudflare, блокировку 403, серверные ошибки и некорректный JSON; оно не меняет настройки Cloudflare автоматически. Заголовок вкладки теперь обновляется даже при ошибке загрузки.
+
+Документация: [определение Challenge по cf-mitigated](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/), [Bot Fight Mode и его ограничения](https://developers.cloudflare.com/bots/get-started/bot-fight-mode/), [Skip rules](https://developers.cloudflare.com/waf/custom-rules/skip/).

@@ -15,8 +15,8 @@ log = logging.getLogger(__name__)
 
 
 class BusinessToolsModule:
-    def __init__(self, bot, db, routes, account_labels, data_dir, enqueue_notification, banner_path=None):
-        self.repo = BusinessToolsRepository(db, routes)
+    def __init__(self, bot, db, routes, account_labels, data_dir, enqueue_notification, banner_path=None, message_cipher=None):
+        self.repo = BusinessToolsRepository(db, routes, message_cipher=message_cipher)
         self.repo.migrate()
         for account_id in routes:
             self.repo.reset_continuity(account_id)

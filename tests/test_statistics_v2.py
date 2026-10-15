@@ -152,6 +152,7 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(len(data['activity_days']),7)
         self.assertIsNone(data['activity_days'][0][1])
         self.db.execute("UPDATE business_stats_progress SET value=? WHERE name='coverage_start'",(self.stamp-10*86400,))
+        self.repo.reset_continuity(100,self.stamp-10*86400)
         self.db.commit()
         data=self.repo.analytics(1,100,200,'7',now=self.stamp)
         self.assertEqual(data['activity_days'][0][1],0)
@@ -438,35 +439,20 @@ class NavigationTests(unittest.IsolatedAsyncioTestCase):
 
 class HandlerIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_events_count_before_notification_filters_and_self_delete_suppression(self):
-        # Compile just these handlers: never import app.py or read a bot token.
-        source=Path('app.py').read_text(encoding='utf-8');tree=ast.parse(source)
-        functions=[]
-        for node in tree.body:
-            if isinstance(node,ast.AsyncFunctionDef) and node.name in ('on_edit','on_delete'):
-                node.decorator_list=[];functions.append(node)
-        db=sqlite3.connect(':memory:');db.row_factory=sqlite3.Row
-        db.execute('CREATE TABLE messages(connection_id TEXT,chat_id INTEGER,message_id INTEGER)')
-        repo=BusinessToolsRepository(db,{100:1});repo.migrate()
-        stamp=int(time.time())
-        repo.record_message('c',100,1,1,message(stamp,100))
-        repo.mark_self_deleted('c',200,1)
-        class Bot: pass
-        async def recipient_for(connection): return 1
-        async def unexpected(*args): raise AssertionError('Unexpected API request')
-        namespace=dict(db=db,recipient_for=recipient_for,account_for=lambda c:100,
-                       business_tools=SimpleNamespace(repo=repo,service=BusinessToolsService(None,repo,None,{}),
-                                                      consume_self_deleted=repo.consume_self_deleted),
-                       message_key=lambda m:('c',200,m.message_id),load_message=lambda key:None,
-                       record_from_message=lambda m:message(stamp,100,text='правка'),
-                       only_others_enabled=lambda owner:True,is_own_message=lambda c,r:True,
-                       save_message=lambda *args:None,enqueue=lambda *args:self.fail('Notification must be filtered'))
-        exec(compile(ast.Module(body=functions,type_ignores=[]),'handlers','exec'),namespace)
-        msg=SimpleNamespace(business_connection_id='c',message_id=1,chat=SimpleNamespace(id=200))
-        await namespace['on_edit'](msg)
-        await namespace['on_delete'](SimpleNamespace(business_connection_id='c',chat=SimpleNamespace(id=200),message_ids=[1]))
-        data=repo.analytics(1,100,200)
-        self.assertEqual((data['metrics']['o_edits'],data['metrics']['o_deleted']),(1,1))
-        db.close()
+        from release_support import Harness
+        h=Harness()
+        try:
+            h.db.execute('INSERT INTO settings VALUES(1,1)');h.db.commit()
+            original=h.message();original['business_message']['from']['id']=100
+            changed=h.message(2,'правка',int(time.time()));changed['edited_business_message']['from']['id']=100
+            await h.feed(original);await h.feed(changed)
+            h.repo.mark_self_deleted('c',200,1)
+            await h.feed(h.delete())
+            data=h.repo.analytics(1,100,200)
+            self.assertEqual((data['metrics']['o_edits'],data['metrics']['o_deleted']),(1,1))
+            self.assertEqual(h.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],0)
+        finally:h.close()
+
 
 
 if __name__=='__main__': unittest.main()

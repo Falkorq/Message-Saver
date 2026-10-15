@@ -10,6 +10,7 @@ from profile_monitor.scheduler import ProfileScheduler
 class AccessManagerTests(unittest.TestCase):
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
+        self.addCleanup(self.db.close)
         self.db.row_factory = sqlite3.Row
         self.routes = {1: 1, 2: 2}
         self.labels = {1: "Account 1", 2: "Account 2"}
@@ -38,6 +39,7 @@ class AccessManagerTests(unittest.TestCase):
 class RevokedOwnerSchedulerTests(unittest.IsolatedAsyncioTestCase):
     async def test_revoked_owner_is_skipped(self):
         db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
         db.row_factory = sqlite3.Row
         repo = ProfileRepository(db)
         repo.migrate()

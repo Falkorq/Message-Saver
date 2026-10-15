@@ -1,10 +1,10 @@
 import json
 import logging
-import re
 import time
 from .analytics import AnalyticsRepository
 from .backup import backup_database
 from datetime import datetime, timedelta, timezone
+from message_crypto import text_metrics
 
 
 STOP_WORDS = {
@@ -19,14 +19,15 @@ log = logging.getLogger(__name__)
 
 
 class BusinessToolsRepository(AnalyticsRepository):
-    def __init__(self, db, routes):
+    def __init__(self, db, routes, message_cipher=None):
         self.db = db
         self.routes = routes
+        self.message_cipher = message_cipher
 
     def migrate(self):
         exists = self.db.execute("SELECT 1 FROM sqlite_master WHERE name='business_stats_progress'").fetchone()
         if not exists:
-            backup_database(self.db)
+            backup_database(self.db, cipher=self.message_cipher)
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS business_mutes (
             owner_id INTEGER NOT NULL,
@@ -90,6 +91,7 @@ class BusinessToolsRepository(AnalyticsRepository):
         self.migrate_analytics()
 
     def record_message(self, connection_id, account_id, owner_id, message_id, record, commit=True):
+        record = self.stats_source(record)
         self.db.execute('SAVEPOINT business_live_stats')
         try:
             result = self._record_message(connection_id,account_id,owner_id,message_id,record)
@@ -104,9 +106,7 @@ class BusinessToolsRepository(AnalyticsRepository):
     def _record_message(self, connection_id, account_id, owner_id, message_id, record):
         self.check_account(owner_id, account_id)
         self.check_chat_owner(owner_id,account_id,record['chat_id'])
-        text = record.get("text") or record.get("caption") or ""
-        if not isinstance(text, str):
-            raise ValueError("Invalid message text type")
+        chars, words = text_metrics(record)
         now = int(record.get('_observed_at') or time.time())
         inserted = self.db.execute(
             "INSERT OR IGNORE INTO business_stats_seen(connection_id,chat_id,message_id,observed_at,account_id) VALUES(?,?,?,?,?)",
@@ -128,7 +128,6 @@ class BusinessToolsRepository(AnalyticsRepository):
         own = record.get("sender_id") == account_id
         display_name = record.get("chat_name") or record.get("name") or str(chat_id)
         username = record.get("chat_username") or (record.get("username") if not own else None)
-        text = record.get("text") or record.get("caption") or ""
         stamp = int(record.get("sent_at") or now)
         dt = datetime.fromtimestamp(stamp, MOSCOW)
         kind = record.get("type") or "unknown"
@@ -153,20 +152,20 @@ class BusinessToolsRepository(AnalyticsRepository):
                 "peer_chars=peer_chars+excluded.peer_chars,first_at=MIN(first_at,excluded.first_at),"
                 "last_at=MAX(last_at,excluded.last_at),media_json=excluded.media_json,hours_json=excluded.hours_json",
                 (owner_id, account_id, chat_id, display_name, username, int(own), int(not own),
-                 len(text) if own else 0, len(text) if not own else 0, stamp, stamp,
+                 chars if own else 0, chars if not own else 0, stamp, stamp,
                  json.dumps(media), json.dumps(hours)),
             )
             self.db.execute(
                 "INSERT OR IGNORE INTO business_stats_days VALUES(?,?,?)",
                 (account_id, chat_id, dt.strftime("%Y-%m-%d")),
             )
-            for word in re.findall(r"[а-яёa-z]{3,}", text.lower()):
+            for word, count in words.items():
                 if word in STOP_WORDS:
                     continue
                 self.db.execute(
-                    "INSERT INTO business_stats_words VALUES(?,?,?,1) "
-                    "ON CONFLICT(account_id,chat_id,word) DO UPDATE SET count=count+1",
-                    (account_id, chat_id, word),
+                    "INSERT INTO business_stats_words VALUES(?,?,?,?) "
+                    "ON CONFLICT(account_id,chat_id,word) DO UPDATE SET count=count+excluded.count",
+                    (account_id, chat_id, word, count),
                 )
             self.record_details(connection_id, account_id, message_id, record)
             self.update_first_observed(account_id,chat_id,now)
@@ -214,6 +213,10 @@ class BusinessToolsRepository(AnalyticsRepository):
             owner_id = self.routes.get(row["account_id"])
             if owner_id is None:
                 continue
+            if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='account_state'").fetchone():
+                lifecycle = self.db.execute('SELECT collecting,cutoff FROM account_state WHERE account_id=?',(row['account_id'],)).fetchone()
+                if lifecycle and (not lifecycle['collecting'] or (row['observed_at'] or 0)*1000 <= (lifecycle['cutoff']*1000 if 0<lifecycle['cutoff']<100000000000 else lifecycle['cutoff'])):
+                    continue
             try:
                 record = json.loads(row["data"])
                 if not isinstance(record, dict):
@@ -283,7 +286,7 @@ class BusinessToolsRepository(AnalyticsRepository):
 
     def resolve_chat(self, owner_id, target):
         text = str(target).strip().lstrip("@").lower()
-        rows = self.chats(owner_id, 500)
+        rows = self.matching_chats(owner_id, target)
         if text.lstrip("-").isdigit():
             chat_id = int(text)
             return next((row for row in rows if row["chat_id"] == chat_id), None)
@@ -316,6 +319,9 @@ class BusinessToolsRepository(AnalyticsRepository):
         return row, days, words
 
     def mute(self, owner_id, row, until_at):
+        raise ValueError("Новое автоудаление входящих временно недоступно. Оно удаляет сообщения, а не отключает уведомления.")
+
+    def _legacy_mute(self, owner_id, row, until_at):
         self.check_account(owner_id,row['account_id'])
         self.db.execute(
             "INSERT INTO business_mutes(owner_id,account_id,chat_id,display_name,username,until_at,added_at,last_error) "
@@ -359,7 +365,7 @@ class BusinessToolsRepository(AnalyticsRepository):
     def set_mute_error(self, account_id, chat_id, error):
         self.db.execute(
             "UPDATE business_mutes SET last_error=? WHERE account_id=? AND chat_id=?",
-            (None if error is None else str(error)[:300], account_id, chat_id),
+            (None if error is None else type(error).__name__, account_id, chat_id),
         )
         self.db.commit()
 

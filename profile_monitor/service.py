@@ -1,4 +1,5 @@
 import time
+from collections import defaultdict, deque
 import uuid
 from html import escape
 
@@ -13,12 +14,30 @@ FIELD_NAMES = {
 
 
 class ProfileMonitorService:
-    def __init__(self, repository, telegram, notifier):
+    def __init__(self, repository, telegram, notifier, access_check=None):
         self.repo = repository
         self.telegram = telegram
         self.notifier = notifier
+        self.access_check = access_check
+        self.manual_requests=defaultdict(deque)
+
+    def manual_budget(self, owner):
+        now=time.monotonic()
+        for key,limit in ((owner,10),('session',30)):
+            bucket=self.manual_requests[key]
+            while bucket and bucket[0]<now-60:bucket.popleft()
+            if len(bucket)>=limit:raise ValueError('Слишком много ручных проверок. Подождите минуту.')
+        self.manual_requests[owner].append(now);self.manual_requests['session'].append(now)
+
+    def require_access(self, owner_id):
+        if self.access_check is not None and not self.access_check(owner_id):
+            raise PermissionError("Мониторинг профилей доступен только выбранным пользователям")
 
     async def watch(self, owner_id, target):
+        self.require_access(owner_id)
+        self.manual_budget(owner_id)
+        if len(self.repo.list(owner_id))>=100 and not self.repo.find(owner_id,target):
+            raise ValueError("Доступно до 100 отслеживаемых профилей; сначала отключите лишние.")
         target = target.strip()
         known = self.repo.find(owner_id, target)
         if known and known["enabled"]:
@@ -37,6 +56,7 @@ class ProfileMonitorService:
         elif target.isdigit():
             target = int(target)
         snapshot, entity = await self.telegram.fetch(target)
+        self.require_access(owner_id)
         existing = self.repo.get(owner_id, snapshot.user_id)
         if existing and existing["enabled"]:
             self.repo.set_access_hash(
@@ -48,6 +68,7 @@ class ProfileMonitorService:
         settings = self.repo.settings(owner_id)
         if snapshot.photo_id and settings["keep_photos"]:
             photo_path = await self.telegram.download_photo(entity, snapshot.user_id, snapshot.photo_id)
+        self.require_access(owner_id)
         self.repo.add(owner_id, snapshot, photo_path, getattr(entity, "access_hash", None))
         return snapshot, True
 
@@ -59,17 +80,20 @@ class ProfileMonitorService:
         return True
 
     async def check_row(self, row, notify=True):
+        self.require_access(row["owner_id"])
         old = self.repo.snapshot(row)
         snapshot, entity = await self.telegram.fetch(
             row["user_id"], access_hash=row["access_hash"], username=row["username"],
             allow_id_search=False,
         )
+        self.require_access(row["owner_id"])
         changes = compare_snapshots(old, snapshot)
         photo_path = None
         if old.photo_id != snapshot.photo_id and snapshot.photo_id:
             settings = self.repo.settings(row["owner_id"])
             if settings["keep_photos"]:
                 photo_path = await self.telegram.download_photo(entity, snapshot.user_id, snapshot.photo_id)
+        self.require_access(row["owner_id"])
         batch_id = uuid.uuid4().hex
         self.repo.save_check(
             row["owner_id"], old, snapshot, changes, batch_id, photo_path,
@@ -81,6 +105,8 @@ class ProfileMonitorService:
         return changes
 
     async def check(self, owner_id, user_id, notify=True):
+        self.require_access(owner_id)
+        self.manual_budget(owner_id)
         row = self.repo.get(owner_id, user_id)
         if not row or not row["enabled"]:
             raise LookupError("Пользователь не отслеживается")

@@ -1,6 +1,7 @@
 """Личный журнал правок и удалений для Telegram Business аккаунтов."""
 
 import asyncio
+from contextvars import ContextVar
 import json
 import logging
 import os
@@ -14,18 +15,29 @@ from pathlib import Path
 from dotenv import load_dotenv
 from telebot import types
 from telebot.async_telebot import AsyncTeleBot
+from telebot import asyncio_helper
+from reliable import AtomicConnection, DurableInbox, DeliveryBudget
+from product_state import ProductState
+from erasure_guard import ErasureGuard
 from telebot.asyncio_helper import ApiTelegramException
 from telebot.util import content_type_media, content_type_service
 
 from access_control import AccessManager
+from message_crypto import MessageCipher, EncryptionError
 from business_notifications import chat_identity
 from business_tools import BusinessToolsModule
 from profile_monitor import ProfileMonitorModule
+from profile_monitor.access import MTProtoAccess
 
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+
+try:
+    message_cipher = MessageCipher.from_env(Path(__file__).with_name('.env'))
+except EncryptionError as exc:
+    raise SystemExit(str(exc)) from None
 
 
 def required_int(name):
@@ -85,7 +97,7 @@ def parse_account_labels(all_account_ids):
             labels[int(account.strip())] = label.strip()
         except ValueError as exc:
             raise SystemExit("ACCOUNT_LABELS должен иметь вид 'ID:подпись,ID:подпись'") from exc
-    return {account_id: labels.get(account_id, f"Account {str(account_id)[-4:]}") for account_id in all_account_ids}
+    return {account_id: labels.get(account_id, f"Аккаунт · {str(account_id)[-4:]}") for account_id in all_account_ids}
 
 
 routes = {account_id: my_chat_id for account_id in my_account_ids}
@@ -94,11 +106,22 @@ account_labels = parse_account_labels(my_account_ids + second_account_ids)
 admin_ids = set(my_account_ids)
 db_path = Path(os.getenv("DB_PATH", "messages.sqlite3"))
 db_path.parent.mkdir(parents=True, exist_ok=True)
-db = sqlite3.connect(db_path)
+db = sqlite3.connect(db_path, factory=AtomicConnection)
 db.row_factory = sqlite3.Row
+db.execute("PRAGMA synchronous=FULL")
+db.execute("PRAGMA secure_delete=ON")
+try:
+    os.chmod(db_path, 0o600)
+except OSError:
+    pass
+try:
+    message_cipher.validate_database_key(db)
+except EncryptionError as exc:
+    db.close()
+    raise SystemExit(str(exc)) from None
 from business_tools.backup import backup_database
 if not db.execute("SELECT 1 FROM sqlite_master WHERE name='business_stats_progress'").fetchone():
-    backup_database(db, "before-update")
+    backup_database(db, "before-update", cipher=message_cipher)
 db.execute("PRAGMA journal_mode=WAL")
 db.executescript("""
 CREATE TABLE IF NOT EXISTS connections (
@@ -155,10 +178,53 @@ if db.execute("PRAGMA user_version").fetchone()[0] < 1:
     db.execute("PRAGMA user_version=1")
 db.commit()
 access = AccessManager(db, routes, account_labels, set(routes))
+try:
+    mtproto_access = MTProtoAccess(routes, set(my_account_ids) | {my_chat_id},
+                                  (os.getenv("MTPROTO_ALLOWED_USER_IDS") or "6640457762,6851862358,803489862"))
+except ValueError as exc:
+    raise SystemExit(str(exc)) from None
 bot = AsyncTeleBot(TOKEN)
+inbox = DurableInbox(db, message_cipher)
+# Seed explicitly configured friends once; /revoke remains effective across restarts.
+db.execute('CREATE TABLE IF NOT EXISTS initial_access_seeds(user_id INTEGER PRIMARY KEY)')
+for invited_id in mtproto_access.allowed_ids - mtproto_access.operator_ids:
+    if not db.execute('SELECT 1 FROM initial_access_seeds WHERE user_id=?',(invited_id,)).fetchone():
+        if invited_id not in routes:
+            access.grant(invited_id)
+        db.execute('INSERT INTO initial_access_seeds VALUES(?)',(invited_id,))
+db.commit()
+product = ProductState(db, routes)
+product.erasure_guard = ErasureGuard(db_path.with_name('erasure-guard.aes'), message_cipher)
+mtproto_access.collection_check = lambda owner: any(product.allows(a) for a,o in routes.items() if o==owner)
+delivery_budget = DeliveryBudget(db)
+current_delivery = ContextVar('current_delivery', default=None)
+
+
+def paced_send(method):
+    async def send(recipient, *args, **kwargs):
+        return await limited_send(method, recipient, *args, **kwargs)
+    send._nyan_paced = True
+    return send
+
+
+for method_name in ('send_message','send_photo','send_voice','send_video','send_video_note',
+                    'send_animation','send_sticker','send_document','send_audio','send_media_group'):
+    setattr(bot, method_name, paced_send(getattr(bot, method_name)))
 
 
 def notification_target(payload):
+    if payload.get('event') not in ('edit','delete','profile_change','text_notification'):
+        return None
+    if payload.get('event')=='text_notification' and payload.get('source')!='business_tools':
+        return None
+    if not product.notifications(payload.get("owner_id") or routes.get(payload.get("account_id")), payload.get("event"), ((payload.get("old") or payload.get("new") or {}).get("sender_id")==payload.get("account_id")) if payload.get("account_id") is not None else None):
+        return None
+    if payload.get('account_id') is not None and bool((db.execute('SELECT only_others FROM settings WHERE recipient_id=?',(routes.get(payload['account_id']),)).fetchone() or [0])[0]) and (payload.get('old') or {}).get('sender_id') == payload['account_id']:
+        return None
+    if payload.get("account_id") is not None and not product.allows(payload["account_id"]):
+        return None
+    if payload.get("event") == "profile_change" and not mtproto_access.owner(payload.get("owner_id")):
+        return None
     if payload.get("event") in ("profile_change", "text_notification"):
         owner_id = payload.get("owner_id")
         return owner_id if owner_id in routes.values() else None
@@ -180,7 +246,7 @@ def refresh_saved_routes():
             payload = {}
         recipient_id = notification_target(payload)
         if recipient_id is None:
-            db.execute("UPDATE outbox SET failed=1, last_error=? WHERE id=?", ("Аккаунт удалён из настроек", row["id"]))
+            db.execute("UPDATE outbox SET failed=1, last_error=? WHERE id=?", ("Доступ или источник уведомления не подтверждён", row["id"]))
         else:
             db.execute("UPDATE outbox SET recipient_id=? WHERE id=?", (recipient_id, row["id"]))
     db.commit()
@@ -293,7 +359,7 @@ def save_message(key, record):
     db.execute(
         "INSERT INTO messages VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(connection_id, chat_id, message_id) DO UPDATE SET data=excluded.data",
-        (*key, json.dumps(record, ensure_ascii=False), int(time.time())),
+        (*key, json.dumps(message_cipher.protect_record(record), ensure_ascii=False), int(time.time())),
     )
     db.commit()
 
@@ -302,13 +368,21 @@ def load_message(key):
     row = db.execute(
         "SELECT data FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?", key
     ).fetchone()
-    return json.loads(row["data"]) if row else None
+    record = json.loads(row["data"]) if row else None
+    if record is not None:
+        message_cipher.validate_record(record)
+    return record
 
 
 def enqueue(recipient_id, payload):
+    if not product.notifications(recipient_id, payload.get("event"), ((payload.get("old") or payload.get("new") or {}).get("sender_id")==payload.get("account_id")) if payload.get("account_id") is not None else None):
+        return
+    if (db.execute("SELECT COUNT(*) FROM outbox WHERE recipient_id=?", (recipient_id,)).fetchone()[0] >= 2000
+            or db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] >= 20000):
+        raise RuntimeError("outbox_capacity")
     db.execute(
         "INSERT INTO outbox(recipient_id, data, created_at) VALUES (?, ?, ?)",
-        (recipient_id, json.dumps(payload, ensure_ascii=False), int(time.time())),
+        (recipient_id, json.dumps(message_cipher.protect_payload(payload), ensure_ascii=False), int(time.time())),
     )
 
 
@@ -323,9 +397,9 @@ async def recipient_for(connection_id):
             connection = await bot.get_business_connection(connection_id)
             break
         except Exception:
-            log.exception("Не удалось получить бизнес-подключение %s (попытка %s)", connection_id, attempt + 1)
+            log.error("Не удалось получить бизнес-подключение (попытка %s)", attempt + 1)
             if attempt == 2:
-                return None
+                raise RuntimeError("connection_unavailable") from None
             await asyncio.sleep(attempt + 1)
     await store_connection(connection)
     return routes.get(connection.user.id) if connection.is_enabled else None
@@ -345,9 +419,17 @@ async def store_connection(connection):
     )
     db.commit()
     if recipient_id is not None:
+        product.ensure(account_id, recipient_id)
+        product.observe(account_id,connection.is_enabled)
+        rights = getattr(connection, 'rights', None)
+        db.execute('UPDATE account_state SET rights=? WHERE account_id=?',
+                   (json.dumps({name:bool(getattr(rights,name,False)) for name in ('can_reply','can_read_messages','can_delete_sent_messages','can_delete_all_messages')} if rights else {}), account_id))
+        db.commit()
         if not known or known['enabled'] != int(connection.is_enabled):
             business_tools.repo.reset_continuity(account_id)
-        log.info("Подключение %s: аккаунт %s, активно=%s", connection.id, account_id, connection.is_enabled)
+        log.info("Состояние Business-подключения обновлено")
+        if not known or known['enabled'] != int(connection.is_enabled):
+            enqueue_html_notification(recipient_id, 'Аккаунт подключён. Откройте /status: отправьте, измените и удалите тестовое сообщение в разрешённом чате. Статистика: /chatstats.' if connection.is_enabled else 'Соединение отключено. Сбор новых сообщений остановлен. Подключение: /connect.')
 
 
 @bot.business_connection_handler()
@@ -355,16 +437,10 @@ async def on_connection(connection):
     await store_connection(connection)
 
 
-@bot.message_handler(commands=["start", "id"])
-async def on_command(msg):
-    if msg.chat.type == "private":
-        reply = f"Ваш Telegram ID: {msg.from_user.id}"
-        if msg.from_user.id in routes:
-            reply += ("\nКоманды: /menu, /watch, /watchlist, /mute, /unmute, /mutelist, "
-                      "/chatstats, /status, /retry_failed, /only_others on|off, /style")
-        if msg.from_user.id in admin_ids:
-            reply += "\nДоступ: /grant, /revoke, /access"
-        await bot.send_message(msg.chat.id, reply)
+from public_ui import PublicUI
+public_ui = PublicUI(bot, db, routes, account_labels, product, inbox, lambda: business_tools,
+                     lambda: profile_monitor, mtproto_access)
+public_ui.register()
 
 
 @bot.message_handler(commands=["grant", "revoke", "access"])
@@ -385,16 +461,29 @@ async def on_access(msg):
     try:
         user_id = int(args[0])
         if command == "/grant":
+            newly_admitted = user_id not in routes
             access.grant(user_id, args[1] if len(args) > 1 else None)
             refresh_saved_routes()
+            product.ensure(user_id, user_id)
+            if newly_admitted:
+                product.collection(user_id, True)
+                business_tools.repo.reset_continuity(user_id)
+            try:
+                await public_ui.welcome(user_id, invited=True)
+            except Exception:
+                pass
             await bot.send_message(
                 msg.chat.id,
                 f"Доступ для {user_id} выдан. Другу нужно отправить боту /start, "
-                "затем подключить его в Chat Automation. Уведомления придут в его личный чат.",
+                "затем открыть «Подключение». Уведомления придут в его личный чат.",
             )
         else:
             removed = access.revoke(user_id)
             if removed:
+                product.observe(user_id,False)
+                db.execute('UPDATE account_state SET collecting=0,cutoff=? WHERE account_id=?',(int(time.time()*1000),user_id))
+                db.commit()
+                business_tools.repo.reset_continuity(user_id)
                 refresh_saved_routes()
             await bot.send_message(msg.chat.id, "Доступ отозван" if removed else "ID не найден в списке")
     except ValueError as exc:
@@ -413,14 +502,13 @@ async def on_control(msg):
     if command == "/retry_failed":
         retried = 0
         for row in db.execute(
-            "SELECT id, data FROM outbox WHERE recipient_id=? AND failed=1", (recipient_id,)
+            "SELECT id, data FROM outbox WHERE recipient_id=? AND failed=1 AND created_at>?", (recipient_id,int(time.time())-7*86400)
         ).fetchall():
             try:
                 payload = json.loads(row["data"])
             except (ValueError, KeyError, TypeError):
                 continue
-            target = (payload.get("owner_id") if payload.get("event") in ("profile_change", "text_notification")
-                      else routes.get(payload.get("account_id")))
+            target = notification_target(payload)
             if target != recipient_id:
                 continue
             db.execute(
@@ -455,7 +543,7 @@ async def on_control(msg):
             "Можно ответить командой на сообщение, содержащее нужный эмодзи. Оформление задаётся отдельно для каждого получателя.\n\nПример:",
         )
         example = {"name": "Пример", "sender_id": None, "username": None, "sent_at": int(time.time())}
-        example_account_id = next(iter(routes))
+        example_account_id = next(a for a,o in routes.items() if o==recipient_id)
         example.update({"chat_id": 123456789, "chat_name": "Пример чата"})
         await send_rich_text(msg.chat.id, "delete", "Удалено сообщение", example_account_id, example, "Текст удалённого сообщения")
         await send_rich_text(msg.chat.id, "edit", "Изменено сообщение", example_account_id, example, "старый текст", "новый текст")
@@ -504,105 +592,127 @@ async def on_control(msg):
 
 def enqueue_html_notification(recipient_id, text):
     enqueue(recipient_id, {
-        "event": "text_notification", "owner_id": recipient_id,
+        "event": "text_notification", "source":"business_tools", "owner_id": recipient_id,
         "text": text, "parse_mode": "HTML",
     })
     db.commit()
 
 
+def enqueue_profile_notification(recipient_id, text):
+    if mtproto_access.owner(recipient_id):
+        enqueue(recipient_id, {
+            "event": "profile_change", "owner_id": recipient_id,
+            "text": text, "parse_mode": "HTML",
+        })
+        db.commit()
+
+
 profile_monitor = ProfileMonitorModule(
-    bot, db, routes, os.getenv("PROFILE_DATA_DIR", "profile_data"), enqueue_html_notification,
+    bot, db, routes, os.getenv("PROFILE_DATA_DIR", "profile_data"), enqueue_profile_notification,
     os.getenv("UI_BANNER_PATH", "banner.jpg"),
+    access_policy=mtproto_access,
 )
 business_tools = BusinessToolsModule(
     bot, db, routes, account_labels, os.getenv("PROFILE_DATA_DIR", "profile_data"),
-    enqueue_html_notification, os.getenv("UI_BANNER_PATH", "banner.jpg"),
+    enqueue_html_notification, os.getenv("UI_BANNER_PATH", "banner.jpg"), message_cipher=message_cipher,
 )
 
+
+if not product.erasure_guard.path.exists():
+    product.erasure_guard.record(0, 0)
+product.erasure_guard.apply(product, inbox)
 
 CONTENT_TYPES = list(dict.fromkeys(
     content_type_media + content_type_service + ["paid_media", "checklist", "live_photo", "rich_message", None]
 ))
 
 
-@bot.business_message_handler(content_types=CONTENT_TYPES)
-async def on_message(msg):
-    recipient_id = await recipient_for(msg.business_connection_id)
-    if recipient_id is None:
-        return
-    record = record_from_message(msg)
-    tool_result = await business_tools.handle_business_message(
-        msg, record, account_for(msg.business_connection_id), recipient_id
-    )
-    if tool_result in ("command", "muted"):
-        return
-    if only_others_enabled(recipient_id) and is_own_message(msg.business_connection_id, record):
-        return
-    save_message(message_key(msg), record)
-
-
-@bot.edited_business_message_handler(content_types=CONTENT_TYPES)
-async def on_edit(msg):
-    recipient_id = await recipient_for(msg.business_connection_id)
-    if recipient_id is None:
-        return
-    key = message_key(msg)
-    old = load_message(key)
-    new = record_from_message(msg)
-    business_tools.service.record_edit(recipient_id,account_for(msg.business_connection_id),key,old,new)
-    if old and not old.get("sent_at") and new.get("sent_at"):
-        old["sent_at"] = new["sent_at"]
-    if old and not old.get("username") and new.get("username"):
-        old["username"] = new["username"]
-    if only_others_enabled(recipient_id) and is_own_message(msg.business_connection_id, new):
-        db.execute("DELETE FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?", key)
-        db.commit()
-        return
-    if old and old != new:
-        enqueue(recipient_id, {"event": "edit", "old": old, "new": new, "account_id": account_for(msg.business_connection_id)})
-    save_message(key, new)
-    db.commit()
-
-
 def account_for(connection_id):
     row = db.execute("SELECT account_id FROM connections WHERE connection_id=?", (connection_id,)).fetchone()
-    return row["account_id"] if row else "?"
+    return row[0] if row else None
 
 
-@bot.deleted_business_messages_handler()
-async def on_delete(event):
-    recipient_id = await recipient_for(event.business_connection_id)
-    if recipient_id is None:
+def normalize_update(raw):
+    for kind in ('business_message', 'edited_business_message'):
+        if kind in raw:
+            msg = types.Message.de_json(raw[kind])
+            return {'kind': kind, 'connection_id': msg.business_connection_id,
+                    'account_id': account_for(msg.business_connection_id), 'chat_id': msg.chat.id,
+                    'message_id': msg.message_id, 'received_at': int(time.time()*1000),
+                    'record': message_cipher.protect_record(record_from_message(msg))}
+    if 'deleted_business_messages' in raw:
+        event = raw['deleted_business_messages']
+        return dict(kind='delete', connection_id=event['business_connection_id'],
+                    account_id=account_for(event['business_connection_id']),
+                    chat_id=event['chat']['id'], message_ids=event['message_ids'], received_at=int(time.time()*1000))
+    return {'kind': 'control', 'raw': raw}
+
+
+def apply_business(uid, payload, recipient):
+    connection, chat = payload['connection_id'], payload['chat_id']
+    account = account_for(connection)
+    if not product.allows(account, payload['received_at']):
         return
-    for message_id in event.message_ids:
-        key = (event.business_connection_id, event.chat.id, message_id)
-        record = load_message(key)
-        self_deleted = business_tools.consume_self_deleted(*key)
-        business_tools.service.record_deletion(recipient_id,account_for(event.business_connection_id),key,record,self_deleted)
-        if self_deleted:
-            db.execute(
-                "DELETE FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?", key
-            )
-            db.commit()
-            continue
-        if record is None:
-            continue
-        record.setdefault("chat_id", event.chat.id)
-        if not record.get("chat_name"):
-            chat = event.chat
-            record["chat_name"] = (getattr(chat, "title", None) or " ".join(
-                value for value in (getattr(chat, "first_name", None), getattr(chat, "last_name", None)) if value
-            ) or getattr(chat, "username", None) or str(chat.id))
-        if not record.get("chat_username"):
-            record["chat_username"] = getattr(event.chat, "username", None)
-        if not record.get("username") and record.get("sender_id") == event.chat.id:
-            record["username"] = getattr(event.chat, "username", None)
-        with db:
-            if not (only_others_enabled(recipient_id) and is_own_message(event.business_connection_id, record)):
-                enqueue(recipient_id, {"event": "delete", "old": record, "account_id": account_for(event.business_connection_id)})
-            db.execute(
-                "DELETE FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?", key
-            )
+    db.execute('UPDATE account_state SET last_event=? WHERE account_id=?', (int(time.time()), account))
+    if payload['kind'] == 'delete':
+        for mid in payload['message_ids']:
+            key = (connection, chat, mid)
+            old = load_message(key)
+            if not inbox.accept_version(key, old or {}, uid, deleted=True):
+                continue
+            self_deleted = business_tools.consume_self_deleted(*key)
+            business_tools.service.record_deletion(recipient, account, key, old, self_deleted)
+            if old and not self_deleted and not (only_others_enabled(recipient) and old.get('sender_id') == account):
+                enqueue(recipient, dict(event='delete', old=old, account_id=account))
+            db.execute('DELETE FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?', key)
+        return
+    key = (connection, chat, payload['message_id'])
+    new = payload['record']
+    if not inbox.accept_version(key, new, uid):
+        tombstone=db.execute('SELECT deleted FROM message_versions WHERE connection_id=? AND chat_id=? AND message_id=?',key).fetchone()
+        if tombstone and tombstone[0] and payload['kind']=='business_message':
+            # Late metadata may complete statistics, never revive the message body.
+            business_tools.repo.record_message(connection,account,recipient,key[2],new)
+        return
+    old = load_message(key)
+    if payload['kind'] == 'business_message':
+        business_tools.repo.record_message(connection, account, recipient, key[2], new)
+    else:
+        # A first-seen edit is a known message, with an unknown original body.
+        business_tools.repo.record_message(connection, account, recipient, key[2], old or new)
+        changed = business_tools.service.record_edit(recipient, account, key, old, new)
+        if changed and old and not message_cipher.records_equal(old, new) and not (only_others_enabled(recipient) and new.get('sender_id') == account):
+            enqueue(recipient, dict(event='edit', old=old, new=new, account_id=account))
+    save_message(key, new)
+
+
+async def dispatch_incoming(uid, payload):
+    if payload['kind'] == 'control':
+        raw = payload['raw']
+        if 'business_connection' in raw:
+            await store_connection(types.BusinessConnection.de_json(raw['business_connection']))
+        else:
+            await bot.process_new_updates([types.Update.de_json(raw)])
+        inbox.done(uid)
+        return
+    recipient = await recipient_for(payload['connection_id'])
+    # No await inside this transaction: repositories, outbox and checkpoint commit together.
+    with db.event_transaction():
+        if recipient is not None:
+            apply_business(uid, payload, recipient)
+        inbox.done(uid)
+
+
+async def durable_polling():
+    async def get_updates(**kwargs):
+        return await asyncio_helper.get_updates(TOKEN, **kwargs)
+    processor = asyncio.create_task(inbox.work(dispatch_incoming), name='incoming-worker')
+    try:
+        await inbox.poll(get_updates, normalize_update)
+    finally:
+        processor.cancel()
+        await asyncio.gather(processor, return_exceptions=True)
+
 
 
 def describe(record):
@@ -649,7 +759,7 @@ DECORATIONS = {
 async def send_text(recipient_id, value):
     # 1800 символов оставляют запас для эмодзи, считающихся двумя UTF-16 единицами.
     for pos in range(0, len(value), 1800):
-        await bot.send_message(recipient_id, value[pos:pos + 1800])
+        await limited_send(bot.send_message, recipient_id, value[pos:pos + 1800])
 
 
 async def send_rich_text(
@@ -701,7 +811,7 @@ async def send_rich_text(
     )
     if start_part == 0:
         try:
-            await bot.send_message(recipient_id, rich, parse_mode="HTML")
+            await limited_send(bot.send_message, recipient_id, rich, parse_mode="HTML")
         except ApiTelegramException as exc:
             # Если Telegram отверг кастомные эмодзи, доставим обычный текст.
             if exc.error_code != 400:
@@ -711,7 +821,7 @@ async def send_rich_text(
                 f"👤 Аккаунт: {account}\n"
                 f"🔄 Отправлено: {when}\n\n{body_plain}"
             )
-            await bot.send_message(recipient_id, plain)
+            await limited_send(bot.send_message, recipient_id, plain)
         if mark_part:
             mark_part(1)
     continuations = []
@@ -731,7 +841,7 @@ async def send_rich_text(
     for index, continuation in enumerate(continuations, start=1):
         if index < start_part:
             continue
-        await bot.send_message(recipient_id, continuation)
+        await limited_send(bot.send_message, recipient_id, continuation)
         if mark_part:
             mark_part(index + 1)
 
@@ -752,16 +862,17 @@ async def send_media(recipient_id, record):
     }
     method = methods.get(record["type"])
     if method:
-        await method(recipient_id, file_id)
+        await limited_send(method, recipient_id, file_id)
 
 
 async def send_notification(
     recipient_id, payload, media_sent=False, mark_media_sent=None,
     text_parts_sent=0, mark_text_part=None,
 ):
+    payload = message_cipher.open_payload(payload)
     if payload["event"] in ("profile_change", "text_notification"):
         if text_parts_sent == 0:
-            await bot.send_message(recipient_id, payload["text"], parse_mode=payload.get("parse_mode"))
+            await limited_send(bot.send_message, recipient_id, payload["text"], parse_mode=payload.get("parse_mode"))
             if mark_text_part:
                 mark_text_part(1)
         return
@@ -774,7 +885,7 @@ async def send_notification(
             except ApiTelegramException as exc:
                 if exc.error_code != 400:
                     raise
-                log.warning("Не удалось переслать удалённое медиа: %s", exc)
+                log.warning("Удалённое медиа недоступно (400)")
             if mark_media_sent:
                 mark_media_sent()
         await send_rich_text(
@@ -798,68 +909,72 @@ async def send_notification(
                          mark_part=mark_text_part)
 
 
+async def limited_send(method, recipient, *args, **kwargs):
+    if getattr(method,'_nyan_paced',False) is True:
+        return await method(recipient,*args,**kwargs)
+    await delivery_budget.take(recipient)
+    current = current_delivery.get()
+    if current and (not db.execute('SELECT 1 FROM outbox WHERE id=?',(current[0],)).fetchone() or notification_target(current[1]) != recipient):
+        raise DeliveryCancelled()
+    return await method(recipient, *args, **kwargs)
+
+
+class DeliveryCancelled(Exception):
+    pass
+
+
+async def deliver_row(row):
+    try:
+        payload = json.loads(row['data'])
+        current_delivery.set((row['id'],payload))
+        if notification_target(payload) != row['recipient_id']:
+            db.execute('DELETE FROM outbox WHERE id=?', (row['id'],)); db.commit()
+            return
+        def mark_media_sent():
+            db.execute('UPDATE outbox SET media_sent=1 WHERE id=?', (row['id'],)); db.commit()
+        def mark_text_part(count):
+            db.execute('UPDATE outbox SET text_parts_sent=? WHERE id=?', (count,row['id'])); db.commit()
+        await send_notification(row['recipient_id'], payload, media_sent=bool(row['media_sent']),
+                                mark_media_sent=mark_media_sent, text_parts_sent=row['text_parts_sent'],
+                                mark_text_part=mark_text_part)
+    except DeliveryCancelled:
+        db.execute('DELETE FROM outbox WHERE id=?',(row['id'],)); db.commit()
+    except Exception as exc:
+        attempts = row['attempts']+1
+        code = getattr(exc, 'error_code', None)
+        delay = min(3600, 15*2**min(attempts-1,8))
+        if code == 429:
+            delay = max(delay, int((exc.result_json or {}).get('parameters',{}).get('retry_after',1)))
+            delivery_budget.postpone(row['recipient_id'], delay)
+        failed = code in (400,401,403,404) or attempts >= 20
+        db.execute('UPDATE outbox SET attempts=?,retry_at=?,failed=?,last_error=? WHERE id=?',
+                   (attempts,int(time.time())+delay,int(failed),f'{type(exc).__name__}:{code or 0}',row['id']))
+        db.commit()
+        log.warning('Доставка %s отложена (%s)', row['id'], type(exc).__name__)
+    else:
+        db.execute('DELETE FROM outbox WHERE id=?',(row['id'],)); db.commit()
+
+
 async def outbox_worker():
-    last_cleanup = 0
-    while True:
-        if time.time() - last_cleanup > 3600:
-            cutoff = int(time.time()) - retention_days * 86400
-            recovered = db.execute("SELECT value FROM business_stats_progress WHERE name='backfill_complete'").fetchone()
-            if recovered and recovered[0]:
-                db.execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
-            db.commit()
-            last_cleanup = time.time()
-        row = db.execute(
-            "SELECT id, recipient_id, data, attempts, media_sent, text_parts_sent FROM outbox "
-            "WHERE failed=0 AND retry_at <= ? ORDER BY id LIMIT 1", (int(time.time()),)
-        ).fetchone()
-        if row is None:
-            await asyncio.sleep(2)
-            continue
-        try:
-            payload = json.loads(row["data"])
-            if notification_target(payload) != row["recipient_id"]:
-                db.execute(
-                    "UPDATE outbox SET failed=1,last_error=? WHERE id=?",
-                    ("Доступ к аккаунту отозван", row["id"]),
-                )
-                db.commit()
-                continue
-            def mark_media_sent():
-                db.execute("UPDATE outbox SET media_sent=1 WHERE id=?", (row["id"],))
-                db.commit()
-
-            def mark_text_part(count):
-                db.execute("UPDATE outbox SET text_parts_sent=? WHERE id=?", (count, row["id"]))
-                db.commit()
-
-            await send_notification(
-                row["recipient_id"], payload,
-                media_sent=bool(row["media_sent"]), mark_media_sent=mark_media_sent,
-                text_parts_sent=row["text_parts_sent"], mark_text_part=mark_text_part,
-            )
-        except Exception as exc:
-            log.exception("Не удалось отправить уведомление %s", row["id"])
-            attempts = row["attempts"] + 1
-            delay = min(3600, 15 * (2 ** min(attempts - 1, 8)))
-            if isinstance(exc, ApiTelegramException):
-                if exc.error_code == 429:
-                    parameters = (exc.result_json or {}).get("parameters") or {}
-                    delay = max(delay, int(parameters.get("retry_after") or 0))
-                elif exc.error_code in (400, 401, 403, 404):
-                    db.execute(
-                        "UPDATE outbox SET attempts=?, failed=1, last_error=? WHERE id=?",
-                        (attempts, str(exc)[:300], row["id"]),
-                    )
-                    db.commit()
-                    continue
-            db.execute(
-                "UPDATE outbox SET attempts=?, retry_at=?, last_error=? WHERE id=?",
-                (attempts, int(time.time()) + delay, str(exc)[:300], row["id"]),
-            )
-            db.commit()
-        else:
-            db.execute("DELETE FROM outbox WHERE id=?", (row["id"],))
-            db.commit()
+    active = {}
+    try:
+        while True:
+            for recipient, task in list(active.items()):
+                if task.done():
+                    task.result(); del active[recipient]
+            now = time.time()
+            rows = db.execute("""SELECT o.* FROM outbox o
+                WHERE o.failed=0 AND o.retry_at<=? AND NOT EXISTS(
+                    SELECT 1 FROM delivery_cooldowns c WHERE c.recipient_id IN (o.recipient_id,0) AND c.until_at>?)
+                AND o.id=(SELECT MIN(x.id) FROM outbox x WHERE x.recipient_id=o.recipient_id AND x.failed=0)
+                ORDER BY o.id LIMIT 32""",(now,now)).fetchall()
+            for row in rows:
+                if row['recipient_id'] not in active and len(active)<8:
+                    active[row['recipient_id']] = asyncio.create_task(deliver_row(row))
+            await asyncio.sleep(.05 if rows else .2)
+    finally:
+        for task in active.values(): task.cancel()
+        await asyncio.gather(*active.values(), return_exceptions=True)
 
 
 async def supervise_outbox():
@@ -869,35 +984,85 @@ async def supervise_outbox():
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("Очередь уведомлений остановилась; перезапущу через 15 секунд")
+            log.error("Очередь уведомлений остановилась; перезапущу через 15 секунд")
             await asyncio.sleep(15)
+
+
+async def maintain_storage():
+    while True:
+        try:
+            now = int(time.time())
+            with db:
+                db.execute('DELETE FROM messages WHERE created_at<?',(now-retention_days*86400,))
+                db.execute('DELETE FROM outbox WHERE created_at<?',(now-7*86400,))
+                db.execute('DELETE FROM business_stats_events WHERE detected_at<?',(now-90*86400,))
+                # Compact seen rows only when a durable version guard prevents recounting.
+                db.execute('DELETE FROM business_stats_seen WHERE observed_at<? AND EXISTS('
+                           'SELECT 1 FROM message_versions v WHERE v.connection_id=business_stats_seen.connection_id '
+                           'AND v.chat_id=business_stats_seen.chat_id AND v.message_id=business_stats_seen.message_id)',(now-90*86400,))
+                db.execute('DELETE FROM profile_changes WHERE created_at<?',(now-90*86400,))
+                expired_photos=db.execute('SELECT id,local_path FROM profile_photos WHERE created_at<? LIMIT 500',(now-90*86400,)).fetchall()
+                for photo in expired_photos:
+                    db.execute('DELETE FROM profile_photos WHERE id=?',(photo['id'],))
+                    if photo['local_path'] and not db.execute('SELECT 1 FROM profile_photos WHERE local_path=?',(photo['local_path'],)).fetchone():
+                        photo_path=Path(photo['local_path']).resolve()
+                        if photo_path.is_relative_to(Path(os.getenv('PROFILE_DATA_DIR','profile_data')).resolve()):
+                            photo_path.unlink(missing_ok=True)
+                db.execute('DELETE FROM business_stats_ui WHERE updated_at<?',(now-7*86400,))
+                db.execute('DELETE FROM business_self_deletions WHERE created_at<?',(now-86400,))
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='business_avatar_cache'").fetchone():
+                    db.execute('DELETE FROM business_avatar_cache WHERE expires_at<?',(now,))
+                db.execute('DELETE FROM data_confirmations WHERE expires_at<?',(now,))
+            inbox.prune()
+            # Pending inbox is never aged out: health reports the oldest event for operator action.
+            db.execute("INSERT OR REPLACE INTO business_stats_progress VALUES('maintenance_at',?)",(int(time.time()),))
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            log.error('Очистка хранилища отложена (%s)',type(exc).__name__)
+        await asyncio.sleep(60)
 
 
 async def main():
     worker = asyncio.create_task(supervise_outbox())
     recovery = asyncio.create_task(business_tools.recover_history())
+    maintenance = asyncio.create_task(maintain_storage())
+    web_runner = None
     try:
         await profile_monitor.start()
-        await bot.set_my_commands([
-            types.BotCommand("menu", "Главное меню"),
-            types.BotCommand("watch", "Отслеживать профиль"),
-            types.BotCommand("watchlist", "Список отслеживаемых"),
-            types.BotCommand("mute", "Замутить чат: /mute @username 1h"),
-            types.BotCommand("unmute", "Снять мут"),
-            types.BotCommand("mutelist", "Активные муты"),
-            types.BotCommand("chatstats", "Статистика чата"),
-            types.BotCommand("status", "Состояние бота"),
-        ])
+        if os.getenv('WEBAPP_URL'):
+            from business_tools.webapp import start_server, validate_url
+            validate_url(os.environ['WEBAPP_URL'])
+            web_runner = await start_server(TOKEN, business_tools.repo, business_tools.service,
+                                            routes, os.getenv('WEBAPP_HOST', '127.0.0.1'),
+                                            int(os.getenv('WEBAPP_PORT', '8080')),
+                                            os.getenv('WEBAPP_SSL_CERT'), os.getenv('WEBAPP_SSL_KEY'),
+                                            profile_module=profile_monitor, product=product, inbox=inbox)
+            log.info('Mini App запущен на порту %s', os.getenv('WEBAPP_PORT', '8080'))
+        # The name is managed in BotFather. Reapplying it on each restart can
+        # hit Telegram's long setMyName flood limit and must not stop polling.
+        try:
+            await bot.set_my_commands([
+                types.BotCommand("menu", "Главное меню"),
+                types.BotCommand("chatstats", "Открыть статистику"),
+                types.BotCommand("connect", "Подключение и состояние"),
+                types.BotCommand("notifications", "Уведомления"),
+                types.BotCommand("data", "Управление данными"),
+                types.BotCommand("help", "Помощь"),
+            ])
+        except Exception as exc:
+            log.warning('Меню команд не обновлено (%s); продолжаю запуск', type(exc).__name__)
         log.info("Бот запущен")
-        await bot.infinity_polling(
-            allowed_updates=["message", "callback_query", "business_connection", "business_message", "edited_business_message", "deleted_business_messages"],
-            skip_pending=False,
-        )
+        await durable_polling()
     finally:
+        if web_runner:
+            await web_runner.cleanup()
         await profile_monitor.close()
         worker.cancel()
         recovery.cancel()
-        await asyncio.gather(worker, recovery, return_exceptions=True)
+        maintenance.cancel()
+        await asyncio.gather(worker, recovery, maintenance, return_exceptions=True)
+        await bot.close_session()
         db.close()
 
 

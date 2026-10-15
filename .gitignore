@@ -1,4 +1,6 @@
 .env
+.env-key-*
+encryption_backups/
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
@@ -7,3 +9,9 @@ __pycache__/
 profile_data/
 *.zip
 backups/
+ssl/
+
+*.aes
+*.session
+*.session-journal
+erasure-guard.tmp

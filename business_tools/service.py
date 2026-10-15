@@ -117,7 +117,7 @@ class BusinessToolsService:
             try:
                 await self._delete(msg.business_connection_id, msg.chat.id, msg.message_id, account_id)
             except Exception as exc:
-                current_error = str(exc)[:300]
+                current_error = type(exc).__name__
                 if previous_error != current_error:
                     self.enqueue(
                         owner_id,

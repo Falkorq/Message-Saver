@@ -63,11 +63,13 @@ def stamp(value, full=False):
 
 
 class ProfileUI:
-    def __init__(self, bot, service, repository, owner_routes, placeholder_dir, banner_path=None):
+    def __init__(self, bot, service, repository, owner_routes, placeholder_dir, banner_path=None,
+                 access_policy=None):
         self.bot = bot
         self.service = service
         self.repo = repository
         self.owner_routes = owner_routes
+        self.access_policy = access_policy
         self.pending_add = {}
         requested_banner = Path(banner_path) if banner_path else None
         if requested_banner and requested_banner.is_file():
@@ -89,7 +91,10 @@ class ProfileUI:
         @bot.message_handler(commands=["watch", "unwatch", "watchlist", "profile_history", "username_history"])
         async def profile_commands(msg):
             if self.authorized_message(msg):
-                await self.handle_command(msg)
+                if self.profile_access(msg.from_user.id):
+                    await self.handle_command(msg)
+                else:
+                    await self.send_html(msg.chat.id, "Мониторинг профилей доступен только выбранным пользователям.")
 
         # Commands must fall through to handlers registered later (e.g. /mute in
         # business_tools), so this handler never matches messages starting with "/".
@@ -98,7 +103,7 @@ class ProfileUI:
                              content_types=["text"])
         async def add_input(msg):
             state = self.pending_add.pop(msg.from_user.id, None)
-            if not state:
+            if not state or not self.authorized_message(msg) or not self.profile_access(msg.from_user.id):
                 return
             try:
                 snapshot, added = await self.service.watch(self.owner(msg.from_user.id), msg.text)
@@ -259,7 +264,9 @@ class ProfileUI:
         return msg.chat.type == "private" and msg.from_user and msg.from_user.id in self.owner_routes
 
     async def authorized_callback(self, call):
-        if call.from_user.id in self.owner_routes and call.message.chat.id == call.from_user.id:
+        public_navigation = call.data in ("pm:nav:main", "pm:nav:tools")
+        if (call.from_user.id in self.owner_routes and call.message.chat.id == call.from_user.id
+                and (public_navigation or self.profile_access(call.from_user.id))):
             return True
         call._answered = True
         try:
@@ -267,6 +274,9 @@ class ProfileUI:
         except Exception:
             log.exception("Не удалось ответить на callback %s", call.id)
         return False
+
+    def profile_access(self, actor_id):
+        return bool(self.access_policy and self.access_policy.actor(actor_id))
 
     async def handle_command(self, msg):
         self.pending_add.pop(msg.from_user.id, None)
@@ -300,12 +310,14 @@ class ProfileUI:
 
     async def send_main(self, chat_id):
         with open(self.placeholder, "rb") as image:
-            await self.bot.send_photo(chat_id, image, caption=f"{icon('bot')} <b>Personal Bot</b>", parse_mode="HTML", reply_markup=self.main_keyboard())
+            await self.bot.send_photo(chat_id, image, caption=f"{icon('bot')} <b>Nyan message</b>", parse_mode="HTML", reply_markup=self.main_keyboard(chat_id))
 
     async def render_main(self, chat_id, message_id):
-        await self.edit_text(chat_id, message_id, f"{icon('bot')} <b>Personal Bot</b>", self.main_keyboard())
+        await self.edit_text(chat_id, message_id, f"{icon('bot')} <b>Nyan message</b>", self.main_keyboard(chat_id))
 
-    def main_keyboard(self):
+    def main_keyboard(self, actor_id=None):
+        if not self.profile_access(actor_id):
+            return keyboard([button("🔧 Инструменты", "pm:nav:tools")])
         return keyboard(
             [button("👤 Профили", "pm:nav:profiles"), button("📡 Наблюдение", "pm:nav:watch")],
             [button("🗃 События", "pm:nav:events"), button("🔧 Инструменты", "pm:nav:tools")],
@@ -437,9 +449,11 @@ class ProfileUI:
                              f"\n\n{icon('popup_info')} Выберите значение:", keyboard(*rows))
 
     async def render_tools(self, chat_id, message_id):
-        rows = self.repo.list(self.owner(chat_id)); errors = sum(bool(r["last_error"]) for r in rows)
-        await self.edit_text(chat_id, message_id, f"{icon('tools')} <b>Инструменты</b>\n\n{icon('list')} Профилей: {len(rows)}"
-                             f"\n{icon('warning')} Ошибок проверки: {errors}", keyboard(
+        text = f"{icon('tools')} <b>Инструменты</b>"
+        if self.profile_access(chat_id):
+            rows = self.repo.list(self.owner(chat_id)); errors = sum(bool(r["last_error"]) for r in rows)
+            text += f"\n\n{icon('list')} Профилей: {len(rows)}\n{icon('warning')} Ошибок проверки: {errors}"
+        await self.edit_text(chat_id, message_id, text, keyboard(
                                  [button("🔕 Муты", "bt:mutes:0"), button("📊 Статистика", "bt:stats:0")],
                                  [button("◀ Назад", "pm:nav:main")]))
 

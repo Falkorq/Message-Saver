@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="480" viewBox="0 0 1280 480" role="img" aria-labelledby="title desc">
-  <title id="title">Message-Saver — Personal Bot</title>
+  <title id="title">Nyan message — Telegram Business</title>
   <desc id="desc">Telegram Business: сообщения, правки, история. Иллюстрация сохранения двух версий сообщения.</desc>
   <rect width="1280" height="480" fill="#121a31"/>
   <path d="M0 407H1280" stroke="#32405d"/>
-  <text x="64" y="87" fill="#a8badf" font-family="Consolas,monospace" font-size="22">Personal Bot / Telegram Business</text>
-  <text x="60" y="212" fill="#f3f5fc" font-family="Arial,sans-serif" font-size="76" font-weight="700" letter-spacing="-3">Message-Saver</text>
+  <text x="64" y="87" fill="#a8badf" font-family="Consolas,monospace" font-size="22">Telegram Business / Mini App</text>
+  <text x="60" y="212" fill="#f3f5fc" font-family="Arial,sans-serif" font-size="76" font-weight="700" letter-spacing="-3">Nyan message</text>
   <text x="66" y="271" fill="#aabde9" font-family="Arial,sans-serif" font-size="28">сообщения остаются в истории</text>
-  <text x="66" y="331" fill="#b7c0d5" font-family="Arial,sans-serif" font-size="21">правки · удаления · профили · статистика</text>
+  <text x="66" y="331" fill="#b7c0d5" font-family="Arial,sans-serif" font-size="21">правки · удаления · статистика чатов</text>
   <g font-family="Arial,sans-serif">
     <path d="M799 104H1172Q1188 104 1188 120V189Q1188 205 1172 205H821L799 222V120Q799 104 815 104" fill="#25324e"/>
     <text x="825" y="138" fill="#a8badf" font-size="17">Было</text>
